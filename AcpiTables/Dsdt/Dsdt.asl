@@ -262,6 +262,9 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             {
                 I2cSerialBusV2 (0x0036, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
                 I2cSerialBusV2 (0x006B, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+                // R378: connection 2 = BM92T USB-C PD controller, for VBUS / charge
+                // role switching on hot-plug (switchbattery.sys v4).
+                I2cSerialBusV2 (0x0018, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
             })
 
             Method (_STA, 0, NotSerialized)

@@ -23,6 +23,7 @@ English: [README.md](README.md)
 |---|---|
 | microSD からデスクトップまで起動 | RCM → coreboot → UEFI（このパッケージ）→ SD 上の Windows Boot Manager |
 | USB ホスト（HS/FS）: ハブ、キーボード、マウス、ストレージ、RTL8153 の有線 LAN | UEFI が XUSB を起動したまま引き渡し、Windows 標準の `USBXHCI` が動かす |
+| Windows の起動後の USB-C の抜き差し（機器なら 5V を出す・止める。充電器付きのハブなら充電 + ホスト） | UEFI R378 が、何もつながっていなくても XUSB を起動する。`switchbattery.sys` v4 が BM92T を見張る |
 | USB-C PD のハブを通した充電 | UEFI: BM92T をシンクにし、BQ24193 を充電モードにして、DR_SWAP でホストになる |
 | 起動時の CPU 1020 MHz、Windows 上で 614〜1766 MHz を選べる | UEFI（PLLX + MAX77621）+ `switchcpu.sys` + 常駐アプリ |
 | ファン（温度による自動制御） | UEFI + `switchfan.sys` |
@@ -48,7 +49,7 @@ English: [README.md](README.md)
 | `Firmware/` | XUSB のファームウェアを置く場所。リポジトリには入っていない（README を参照）。 |
 | `patches/edk2/` | edk2 の `XhciDxe` の修正。非コヒーレントな DMA バッファを write-combine で確保する。 |
 | `patches/coreboot/` | [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) を、今のツールでビルドするための修正。 |
-| `Tools/uefi/package-R377.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
+| `Tools/uefi/package-R378.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
 | `Tools/rcm-mac/` | macOS から shofel2 でペイロードを送る手順。 |
 | `windows/` | Windows のドライバー。<br>・ソース: `Tegra210Gpio`、`Tegra210I2c`、`Switch*`<br>・導入キット: `Switch-*`。テスト署名済み。<br>・ビルド用スクリプト、常駐アプリ、ログインの修正 |
 | `docs/ja/uefi-revisions/` | UEFI の試験イメージごとの説明と、実機での結果。 |
@@ -60,7 +61,7 @@ English: [README.md](README.md)
 3. `NintendoSwitchPkg/NintendoSwitch.dsc` を、AARCH64・GCC5 でビルドする。
 4. `TEGRA210_EFI.fd` を ELF のペイロードに包んで、coreboot の ROM に `fallback/payload` として入れる。
    - coreboot の ROM は、imbushuo/Coreboot に `patches/coreboot` を当ててビルドしたもの。
-   - 正確なコマンドは `Tools/uefi/package-R377.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
+   - 正確なコマンドは `Tools/uefi/package-R378.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
 5. Switch を RCM にして、shofel2 で ROM を送る。
    - Linux から: `shofel2.py cbfs.bin coreboot.rom`
    - macOS から: `Tools/rcm-mac/` を参照。

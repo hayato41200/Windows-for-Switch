@@ -154,7 +154,7 @@
 #define R290_USB2_VBUS_ID_REG 0xC60U
 #define R290_ID_OVERRIDE_MASK (0xFU << 18)
 #define R290_ID_OVERRIDE_GROUNDED 0U
-#define R288_HOST_POLLS 30
+#define R288_HOST_POLLS 10       // R378: was 30; hot-plug is handled in Windows now
 #define R288_HOST_STREAK 3
 #define XUSB_HCD_BASE   0x70090000UL
 #define XUSB_FPCI_BASE  0x70098000UL
@@ -215,6 +215,10 @@ STATIC UINTN mR362StatusRound;
 // R363: TRUE when the partner sources power (USB-C hub with a charger). The
 // Switch then sinks power and charges, and XUSB is still brought up as host.
 STATIC BOOLEAN mR363SinkMode;
+// R378: no partner at boot. XUSB is still brought up (without VBUS) so that
+// switchbattery.sys v4 can switch VBUS / the charge path when something is
+// plugged in under Windows.
+STATIC BOOLEAN mR378NoPartner;
 
 typedef enum {
   R300_GATE_NOT_ENTERED = 0,
@@ -2458,7 +2462,7 @@ STATIC VOID EFIAPI R362UsbStatus (EFI_EVENT Event, VOID *Context) {
   }
   Print (L"R362 BlockIo handles=%u SimpleFileSystem handles=%u; in the Shell run: map -r\r\n",
          (UINT32)Count, (UINT32)FsCount);
-  R363PrintPower (mR363SinkMode ? L"status(sink)" : L"status(otg)");
+  R363PrintPower (mR363SinkMode ? L"status(sink)" : mR378NoPartner ? L"status(idle)" : L"status(otg)");
   R366PrintFan (L"status", 1);
   R373PrintTouch ();
   {
@@ -3926,7 +3930,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R377 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R378 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4039,8 +4043,14 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
     goto R363PathSetup;
   }
   if (!HostGatePassed) {
-    Print (L"SAFE TIMEOUT: host/sink gate absent; BQ VBUS unchanged.\r\n");
-    goto R288Cleanup;
+    // R378: nothing attached. Bring XUSB up anyway, with VBUS off (BQ stays in
+    // charge mode) and the BM92T source-mode setting kept, so Windows can
+    // enable VBUS or the charge path on a later plug-in.
+    Print (L"R378 no partner after %u s: XUSB host without VBUS; Windows handles hot-plug.\r\n",
+           (UINT32)R288_HOST_POLLS);
+    mR378NoPartner = TRUE;
+    R363DisableBqWatchdog ();
+    goto R363PathSetup;
   }
   Print (L"Stable BM92T host state: PASS.\r\n");
 
@@ -4088,6 +4098,8 @@ R288Cleanup:
     Print (L" R363 RESULT: XUSB running, stock XhciDxe/UsbBus/UsbMassStorage connected\r\n");
     if (mR363SinkMode) {
       Print (L" power=HUB/CHARGER (sink, charging, kept) path=PASS PADCTL host=PASS (kept)\r\n");
+    } else if (mR378NoPartner) {
+      Print (L" nothing attached: VBUS off, path=PASS PADCTL host=PASS (kept); plug in under Windows\r\n");
     } else {
       Print (L" host-gate=PASS VBUS=PASS (kept) path=PASS (kept) PADCTL host=PASS (kept)\r\n");
     }

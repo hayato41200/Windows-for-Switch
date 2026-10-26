@@ -26,6 +26,7 @@ EDK2 platform package, whose history is kept here). It adds:
 |---|---|
 | Boot to the desktop from microSD | RCM → coreboot → UEFI (this package) → Windows Boot Manager on the SD |
 | USB host: HS and FS, hubs, keyboard, mouse, storage, RTL8153 Ethernet | UEFI brings XUSB up and leaves it running; Windows inbox `USBXHCI` |
+| USB-C hot-plug under Windows (device: VBUS on/off; charger hub: charge + host) | UEFI R378 starts XUSB even with nothing attached; `switchbattery.sys` v4 watches the BM92T |
 | Charging through a USB-C PD hub | UEFI: BM92T sink + BQ24193 charge mode + DR_SWAP to host |
 | CPU at 1020 MHz at boot; selectable 614–1766 MHz in Windows | UEFI (PLLX + MAX77621) + `switchcpu.sys` + tray app |
 | Fan (temperature controlled) | UEFI + `switchfan.sys` |
@@ -46,7 +47,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R377.sh` | The script the tested image was built with (paths are those of the original setup). |
+| `Tools/uefi/package-R378.sh` | The script the tested image was built with (paths are those of the original setup). |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Windows drivers: sources (`Tegra210Gpio`, `Tegra210I2c`, `Switch*`), installable kits (`Switch-*`, test-signed), the build script, the tray app and the login fix. |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -59,7 +60,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 3. Build `NintendoSwitchPkg/NintendoSwitch.dsc` for AARCH64 with GCC5.
 4. Wrap `TEGRA210_EFI.fd` as an ELF payload and add it to a coreboot ROM built from
    imbushuo/Coreboot (with `patches/coreboot`), as `fallback/payload`.
-   - `Tools/uefi/package-R377.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
+   - `Tools/uefi/package-R378.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
 5. Send the ROM in RCM with shofel2. From Linux:
    `shofel2.py cbfs.bin coreboot.rom`. For macOS, see `Tools/rcm-mac/`.
 

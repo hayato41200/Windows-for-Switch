@@ -114,5 +114,252 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // Tegra210 XUSB xHCI host controller.
+        //
+        // Linux runtime evidence identifies three MMIO windows at 0x70090000,
+        // 0x70098000 and 0x70099000, with GIC SPI 39/40/49.  ACPI describes
+        // ARM GIC SPIs as global interrupt numbers, so these become GSI
+        // 71/72/81 (SPI + 32).  This is an enumeration-only step: the DXE
+        // audit driver remains read-only and no XUSB register writes are
+        // introduced here.
+        Device (XHC0)
+        {
+            Name (_HID, "PNP0D10")
+            Name (_CID, "PNP0D10")
+            Name (_UID, Zero)
+            Name (_CCA, Zero)
+
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x70090000, 0x00008000)
+                Memory32Fixed (ReadWrite, 0x70098000, 0x00001000)
+                Memory32Fixed (ReadWrite, 0x70099000, 0x00001000)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Shared)
+                {
+                    0x00000047, // GIC SPI 39
+                    0x00000048, // GIC SPI 40
+                    0x00000051  // GIC SPI 49
+                }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R367: Tegra210 GPIO controller (Windows driver tegra210gpio.sys,
+        // GpioClx). MMIO 0x6000D000, 8 banks x 32 pins; one GIC SPI per bank
+        // in bank order: SPI 32, 33, 34, 35, 55, 87, 89, 125 (Linux
+        // tegra210 gpio node) = GSI 64, 65, 66, 67, 87, 119, 121, 157.
+        // GPIO number = port * 8 + bit (PX6 = 190, PX7 = 191).
+        Device (GPI0)
+        {
+            Name (_HID, "SWOA0101")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x6000D000, 0x00001000)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive)
+                {
+                    0x00000040, 0x00000041, 0x00000042, 0x00000043,
+                    0x00000057, 0x00000077, 0x00000079, 0x0000009D
+                }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R368: hardware buttons for Windows (inbox HID button driver).
+        // R369: R368 used PNP0C40, which no inbox INF on Windows 10 matches
+        // (problem 28); hidinterrupt.inf binds ACPI0011 with this _DSD.
+        // Volume up = PX6 (GPIO 190), volume down = PX7 (GPIO 191), both
+        // active low with pull-ups (L4T gpio-keys). The power button is on
+        // the MAX77620 PMIC (and maybe PX5); it is not listed here yet.
+        // GpioInt must be edge ActiveBoth so press and release are both seen.
+        Device (BTNS)
+        {
+            Name (_HID, "ACPI0011")    // R369: ACPI 6.0 Generic Buttons Device (hidinterrupt.inf)
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                {
+                    190     // PX6: volume up
+                }
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                {
+                    191     // PX7: volume down
+                }
+            })
+
+            // Map GpioInt index -> HID usage (Windows 10 button array _DSD).
+            Name (_DSD, Package (0x02)
+            {
+                ToUUID ("fa6bd625-9ce8-470d-a2c7-b3ca36c4282e"),
+                Package (0x03)
+                {
+                    Package (0x05) { Zero, One, Zero, One, 0x0D },          // Portable Device Control collection
+                    Package (0x05) { One, Zero, One, 0x0C, 0xE9 },          // GpioInt 0: Volume Increment
+                    Package (0x05) { One, One, One, 0x0C, 0xEA }            // GpioInt 1: Volume Decrement
+                }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R370: Tegra210 I2C controllers for the Windows driver tegra210i2c.sys
+        // (SpbCx, ACPI\SWOA0201). Only the buses whose clock/reset UEFI
+        // already enables (PmicDxe: I2C1 and I2C5). Interrupts are from the
+        // L4T DT (GIC SPI 38 and 53 = GSI 70 and 85); driver v1 polls.
+        //   I2C1 0x7000C000, 100 kHz: BM92T 0x18, MAX17050 0x36, TMP451 0x4C, BQ24193 0x6B
+        //   I2C5 0x7000D000, 400 kHz: MAX77621 CPU 0x1B / GPU 0x1C, MAX77620 PMIC 0x3C
+        Device (I2C1)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, One)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000C000, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x00000046 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        Device (I2C5)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, 0x05)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000D000, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x00000055 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R371: system battery for switchbattery.sys (ACPI\SWOA0301, battc).
+        // Connection 0 = MAX17050 fuel gauge, 1 = BQ24193 charger, both on I2C1.
+        Device (BAT0)
+        {
+            Name (_HID, "SWOA0301")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x0036, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x006B, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R372: fan control for switchfan.sys (ACPI\SWOA0401). PWM controller
+        // (the driver only writes PWM_CSR_1 = fan) and the TMP451 sensor on I2C1.
+        Device (FAN0)
+        {
+            Name (_HID, "SWOA0401")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000A000, 0x00000100)
+                I2cSerialBusV2 (0x004C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R373: I2C3 (GEN3_I2C) for the touch panel. UEFI R373 powers the
+        // panel (LDO6 2.9 V, reset PJ7 high) and enables the I2C3 clock.
+        Device (I2C3)
+        {
+            Name (_HID, "SWOA0201")
+            Name (_UID, 0x03)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x7000C500, 0x00000100)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x0000007C }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R373: STM FTM4 touch controller (ACPI\SWOA0501), 0x49 on I2C3,
+        // interrupt PX1 (GPIO 185) level low.
+        Device (TCH0)
+        {
+            Name (_HID, "SWOA0501")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x0049, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C3", 0x00, ResourceConsumer, , Exclusive, )
+                GpioInt (Level, ActiveLow, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, , ) { 185 }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
+        // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
+        Device (PWRB)
+        {
+            Name (_HID, "SWOA0601")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R375: CPU clock control for switchcpu.sys (ACPI\SWOA0701). CAR window
+        // (PLLX, CCLK burst policy), MAX77621 VDD_CPU on I2C5, TMP451 on I2C1
+        // (shared with the fan driver) for the thermal guard.
+        Device (CPUC)
+        {
+            Name (_HID, "SWOA0701")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x60006000, 0x00001000)
+                I2cSerialBusV2 (0x001B, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x004C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Shared, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
     } // Scope(_SB)
 }

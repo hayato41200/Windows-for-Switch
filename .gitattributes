@@ -1,0 +1,5 @@
+*.sh text eol=lf
+*.sys binary
+*.cat binary
+*.exe binary
+*.cer binary

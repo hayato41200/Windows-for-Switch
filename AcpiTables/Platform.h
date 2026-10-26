@@ -27,6 +27,13 @@
 #define EFI_ACPI_ARM_CREATOR_ID SIGNATURE_32('I', 'M', 'B', 'U')
 #define EFI_ACPI_ARM_CREATOR_REVISION 0x00000004
 
+// LLD does not mark an output section executable when it contains only ACPI
+// data. GenFw expects a non-empty executable .text section in these helper
+// ELFs, so retain a harmless function when building with Clang/LLD.
+#if defined (__clang__)
+VOID __attribute__((used)) GenFwTextAnchor (VOID) { }
+#endif
+
 // A macro to initialise the common header part of EFI ACPI tables as defined by
 // EFI_ACPI_DESCRIPTION_HEADER structure.
 #define ARM_ACPI_HEADER(Signature, Type, Revision)                             \

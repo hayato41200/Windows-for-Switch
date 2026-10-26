@@ -34,7 +34,8 @@
   GCC:*_*_AARCH64_DLINK_FLAGS = -z common-page-size=0x10000
 
 [BuildOptions.common]
-  GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable
+  GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-error=stringop-overflow
+  CLANG38:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-but-set-variable
 
 ################################################################################
 #
@@ -236,7 +237,7 @@
   gEfiMdePkgTokenSpaceGuid.PcdDefaultTerminalType|4
 
   gEfiMdeModulePkgTokenSpaceGuid.PcdBootManagerMenuFile|{ 0x21, 0xaa, 0x2c, 0x46, 0x14, 0x76, 0x03, 0x45, 0x83, 0x6e, 0x8a, 0xb6, 0xf4, 0x66, 0x23, 0x31 }
-  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|3
+  gEfiMdePkgTokenSpaceGuid.PcdPlatformBootTimeOut|45
 
   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVendor|L"Nintendo Switch AArch64 UEFI"
   # According to TRM
@@ -387,8 +388,10 @@
   NintendoSwitchPkg/Drivers/PmicDxe/PmicDxe.inf
   NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf
   NintendoSwitchPkg/Drivers/PinMuxDxe/PinMuxDxe.inf
+  NintendoSwitchPkg/Drivers/UsbPowerAuditDxe/UsbPowerAudit.inf
   # NintendoSwitchPkg/Drivers/EhciPciEmulationDxe/PciEmulation.inf
   MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
+  MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf
   MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf {
     <PcdsFixedAtBuild>
       gEfiMdePkgTokenSpaceGuid.PcdDebugPrintErrorLevel|0x800fffff

@@ -114,8 +114,14 @@ READ_LOCK_STATUS   = TRUE
   INF NintendoSwitchPkg/Drivers/PmicDxe/PmicDxe.inf
   INF NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf
   INF NintendoSwitchPkg/Drivers/PinMuxDxe/PinMuxDxe.inf
+  INF NintendoSwitchPkg/Drivers/UsbPowerAuditDxe/UsbPowerAudit.inf
+  # R359: XUSB firmware embedded for UsbPowerAuditDxe (GetSectionFromAnyFv)
+  FILE FREEFORM = 5A0F6A3E-2D4C-4C1B-9E51-7B3F168A0C42 {
+    SECTION RAW = NintendoSwitchPkg/Firmware/tegra21x_xusb_firmware
+  }
   # INF NintendoSwitchPkg/Drivers/EhciPciEmulationDxe/PciEmulation.inf
   INF MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
+  INF MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf
   INF MdeModulePkg/Bus/Pci/EhciDxe/EhciDxe.inf
   INF MdeModulePkg/Bus/Usb/UsbBusDxe/UsbBusDxe.inf
   INF MdeModulePkg/Bus/Usb/UsbMassStorageDxe/UsbMassStorageDxe.inf

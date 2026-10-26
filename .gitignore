@@ -2,3 +2,9 @@ Include/FwReleaseInfo.h
 Tools/grubaa64.efi
 AcpiTables/T114Ref.asl
 .vscode
+
+# Windows for Switch
+Firmware/tegra21x_xusb_firmware
+*.rom
+build/
+.DS_Store

@@ -1,0 +1,29 @@
+--- a/MdeModulePkg/Bus/Pci/XhciDxe/UsbHcMem.c	2026-10-26 17:41:45.632923100 +0900
++++ b/MdeModulePkg/Bus/Pci/XhciDxe/UsbHcMem.c	2026-10-26 17:41:45.676854300 +0900
+@@ -66,7 +66,7 @@
+                     EfiBootServicesData,
+                     Pages,
+                     &BufHost,
+-                    0
++                    EFI_PCI_IO_ATTRIBUTE_MEMORY_WRITE_COMBINE
+                     );
+ 
+   if (EFI_ERROR (Status)) {
+@@ -658,7 +658,7 @@
+                       EfiBootServicesData,
+                       RealPages,
+                       &Memory,
+-                      0
++                      EFI_PCI_IO_ATTRIBUTE_MEMORY_WRITE_COMBINE
+                       );
+     if (EFI_ERROR (Status)) {
+       return EFI_OUT_OF_RESOURCES;
+@@ -691,7 +691,7 @@
+                       EfiBootServicesData,
+                       Pages,
+                       &Memory,
+-                      0
++                      EFI_PCI_IO_ATTRIBUTE_MEMORY_WRITE_COMBINE
+                       );
+     if (EFI_ERROR (Status)) {
+       return EFI_OUT_OF_RESOURCES;

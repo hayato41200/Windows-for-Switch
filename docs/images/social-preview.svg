@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#131a33"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a4fa3"/>
+      <stop offset="1" stop-color="#1b8fe0"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5ab0ff" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#5ab0ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#5ab0ff" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+
+  <!-- circuit traces -->
+  <g fill="none" stroke="#3a5bd9" stroke-opacity="0.35" stroke-width="2">
+    <path d="M0 586 H300 L330 612 H560"/>
+    <path d="M620 640 V600 L650 570 H700"/>
+    <path d="M1280 90 H1120 L1080 130 H900"/>
+    <path d="M1280 50 H1180 L1150 20 H980"/>
+  </g>
+  <g fill="#5ab0ff" fill-opacity="0.7">
+    <circle cx="560" cy="612" r="4"/><circle cx="700" cy="570" r="4"/>
+    <circle cx="900" cy="130" r="4"/><circle cx="980" cy="20" r="4"/>
+  </g>
+
+  <!-- handheld: left grip, tablet, right grip -->
+  <g transform="translate(700 150)">
+    <rect x="-8" y="300" width="520" height="40" fill="url(#beam)"/>
+    <rect x="0" y="0" width="84" height="300" rx="42" fill="#2b3350"/>
+    <rect x="428" y="0" width="84" height="300" rx="42" fill="#2b3350"/>
+    <circle cx="42" cy="110" r="20" fill="#11172b"/>
+    <g fill="#11172b">
+      <circle cx="42" cy="196" r="9"/><circle cx="42" cy="232" r="9"/>
+      <circle cx="24" cy="214" r="9"/><circle cx="60" cy="214" r="9"/>
+    </g>
+    <circle cx="470" cy="196" r="20" fill="#11172b"/>
+    <g fill="#11172b">
+      <circle cx="470" cy="70" r="9"/><circle cx="470" cy="106" r="9"/>
+      <circle cx="452" cy="88" r="9"/><circle cx="488" cy="88" r="9"/>
+    </g>
+    <rect x="88" y="0" width="336" height="300" rx="14" fill="#1a1f30"/>
+    <rect x="104" y="16" width="304" height="268" rx="4" fill="url(#screen)"/>
+    <!-- desktop: windows and a taskbar -->
+    <rect x="128" y="44" width="150" height="96" rx="3" fill="#ffffff" fill-opacity="0.92"/>
+    <rect x="128" y="44" width="150" height="14" rx="3" fill="#cfd8e6"/>
+    <rect x="140" y="70" width="110" height="6" rx="3" fill="#9fb0c8"/>
+    <rect x="140" y="84" width="84" height="6" rx="3" fill="#9fb0c8"/>
+    <rect x="140" y="98" width="96" height="6" rx="3" fill="#9fb0c8"/>
+    <rect x="216" y="120" width="170" height="110" rx="3" fill="#ffffff" fill-opacity="0.96"/>
+    <rect x="216" y="120" width="170" height="14" rx="3" fill="#cfd8e6"/>
+    <polyline points="230,210 262,184 290,196 322,160 354,170 372,148" fill="none" stroke="#1b8fe0" stroke-width="4" stroke-linejoin="round"/>
+    <rect x="104" y="262" width="304" height="22" fill="#0b1020" fill-opacity="0.85"/>
+    <g fill="#ffffff">
+      <rect x="112" y="267" width="5" height="5"/><rect x="119" y="267" width="5" height="5"/>
+      <rect x="112" y="274" width="5" height="5"/><rect x="119" y="274" width="5" height="5"/>
+    </g>
+    <rect x="300" y="268" width="44" height="10" rx="2" fill="#7ee08a"/>
+    <text x="322" y="276.5" font-family="Segoe UI, Arial, sans-serif" font-size="9" font-weight="700" fill="#0b1020" text-anchor="middle">1.4 GHz</text>
+    <rect x="352" y="269" width="22" height="9" rx="2" fill="none" stroke="#ffffff" stroke-width="1.5"/>
+    <rect x="354" y="271" width="16" height="5" fill="#7ee08a"/>
+  </g>
+
+  <!-- title -->
+  <text x="80" y="230" font-family="Segoe UI, Arial, sans-serif" font-size="78" font-weight="700" fill="#ffffff">Windows</text>
+  <text x="80" y="318" font-family="Segoe UI, Arial, sans-serif" font-size="78" font-weight="700" fill="#ffffff">for <tspan fill="#5ab0ff">Switch</tspan></text>
+  <text x="82" y="372" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#b8c4e0">Windows 10 on ARM64 · Tegra210 (Erista)</text>
+  <text x="82" y="408" font-family="Segoe UI, Arial, sans-serif" font-size="26" fill="#b8c4e0">coreboot + EDK2 UEFI · native KMDF drivers</text>
+
+  <!-- feature chips -->
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="19" fill="#dfe7ff">
+    <g transform="translate(80 452)">
+      <rect width="80" height="36" rx="18" fill="#22305e"/><text x="40" y="24" text-anchor="middle">USB</text>
+      <rect x="96" width="92" height="36" rx="18" fill="#22305e"/><text x="142" y="24" text-anchor="middle">Touch</text>
+      <rect x="204" width="104" height="36" rx="18" fill="#22305e"/><text x="256" y="24" text-anchor="middle">Battery</text>
+      <rect x="324" width="128" height="36" rx="18" fill="#22305e"/><text x="388" y="24" text-anchor="middle">CPU clock</text>
+    </g>
+    <g transform="translate(80 504)">
+      <rect width="72" height="36" rx="18" fill="#22305e"/><text x="36" y="24" text-anchor="middle">Fan</text>
+      <rect x="88" width="120" height="36" rx="18" fill="#22305e"/><text x="148" y="24" text-anchor="middle">Backlight</text>
+      <rect x="224" width="108" height="36" rx="18" fill="#22305e"/><text x="278" y="24" text-anchor="middle">Buttons</text>
+      <rect x="348" width="104" height="36" rx="18" fill="#22305e"/><text x="400" y="24" text-anchor="middle">Power</text>
+    </g>
+  </g>
+</svg>

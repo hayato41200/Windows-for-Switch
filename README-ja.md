@@ -51,7 +51,7 @@ English: [README.md](README.md)
 | `patches/coreboot/` | [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) を、今のツールでビルドするための修正。 |
 | `Tools/uefi/package-R378.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
 | `Tools/rcm-mac/` | macOS から shofel2 でペイロードを送る手順。 |
-| `windows/` | Windows のドライバー。<br>・ソース: `Tegra210Gpio`、`Tegra210I2c`、`Switch*`<br>・導入キット: `Switch-*`。テスト署名済み。<br>・ビルド用スクリプト、常駐アプリ、ログインの修正 |
+| `windows/` | Windows を用意するときの道具（ログインの修正、ドライバーの棚卸し）。ドライバー本体は [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) にある。 |
 | `docs/ja/uefi-revisions/` | UEFI の試験イメージごとの説明と、実機での結果。 |
 
 ## UEFI のペイロードのビルド
@@ -68,23 +68,8 @@ English: [README.md](README.md)
 
 ## Windows のドライバーの入れ方
 
-ドライバーは KMDF 1.15 で、LLVM（clang-cl、lld-link）と WDK 10.0.19041 のヘッダーでビルドしています。ビルドのしかたは `windows/tools/Build-Driver.ps1` を見てください。
-
-1. **テスト署名モードを有効にする。** PC から `windows/Switch-Stage0/Set-SwitchTestSigning.ps1` で行う。SD の BCD を `bcdedit /store` で書き換える。
-2. **証明書を入れる。** `windows/tools/cert/SwitchWOA-Test.cer` を、Switch の「信頼されたルート」と「信頼された発行元」に入れる。
-   - 自分の証明書で署名し直してもよい。
-3. **ドライバーを順に入れる。** 各 `Switch-*` フォルダーに、スクリプトと README がある。
-   1. GPIO（`Switch-Stage1`）
-   2. I2C（`Switch-Stage3`）
-   3. バッテリー
-   4. ファン・バックライト
-   5. タッチ
-   6. 電源ボタン
-   7. CPU クロック
-   8. 時計（RTC）。入れたあと、ネットにつないだ状態で `Rtc.ps1 -Mode Sync` を1回実行する。
-4. **（任意）常駐アプリを起動する。** `windows/Switch-ClockTray/SwitchClock.exe` を起動すると、通知領域から CPU のプロファイルと画面の明るさを選べる。
-
-Windows 10 ARM64 の Windows PowerShell 5.1 は、x86 として動きます。そのため、各スクリプトは `%windir%\Sysnative` を通して `pnputil` や `bcdedit` を呼んでいます。
+ドライバー、導入キット、コントロールセンター（SwitchCenter）は、[Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) に移しました。
+そちらのリリースの ZIP を取ってきて、README の手順で入れてください。順番は、テスト署名の準備、GPIO、I2C、バッテリー、ファン、タッチ、電源ボタン、CPU クロック、時計（RTC）です。入れたあとは、コントロールセンターからドライバーを更新（OTA）できます。
 
 ## クレジット
 

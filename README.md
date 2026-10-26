@@ -49,7 +49,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
 | `Tools/uefi/package-R378.sh` | The script the tested image was built with (paths are those of the original setup). |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
-| `windows/` | Windows drivers: sources (`Tegra210Gpio`, `Tegra210I2c`, `Switch*`), installable kits (`Switch-*`, test-signed), the build script, the tray app and the login fix. |
+| `windows/` | Setup helpers: the login fix and the driver inventory script. The drivers themselves are in [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers). |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
 
 ## Building the UEFI payload
@@ -66,28 +66,11 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 
 ## Installing the Windows drivers
 
-The drivers are KMDF 1.15, built with LLVM (clang-cl, lld-link) against the WDK
-10.0.19041 headers; see `windows/tools/Build-Driver.ps1`.
-
-1. Enable test signing from a PC with `windows/Switch-Stage0/Set-SwitchTestSigning.ps1`.
-   It edits the BCD on the SD with `bcdedit /store`.
-2. Import `windows/tools/cert/SwitchWOA-Test.cer` on the Switch.
-   - It goes into Trusted Root and Trusted Publishers.
-   - Or rebuild the drivers and sign them with your own certificate.
-3. Install the drivers in this order. Each `Switch-*` folder has a script and a README.
-   1. GPIO (`Switch-Stage1`)
-   2. I2C (`Switch-Stage3`)
-   3. Battery
-   4. Fan / backlight
-   5. Touch
-   6. Power button
-   7. CPU clock
-   8. RTC (then run `Rtc.ps1 -Mode Sync` once with the network up)
-4. Optional: run `windows/Switch-ClockTray/SwitchClock.exe` from the notification area.
-   It selects the CPU profile and the screen brightness.
-
-On Windows 10 ARM64, Windows PowerShell 5.1 runs as x86. The scripts therefore reach
-`pnputil`/`bcdedit` through `%windir%\Sysnative`.
+The drivers, their install kits and the control center (SwitchCenter) are in
+[Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers).
+Download the release ZIPs there and follow its README (test signing, then GPIO, I2C,
+battery, fan, touch, power button, CPU clock and RTC). The control center can then
+update the drivers over the air.
 
 ## Credits
 

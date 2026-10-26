@@ -14,7 +14,7 @@ EDK2 platform package, whose history is kept here). It adds:
 - a set of Windows kernel drivers for the Switch hardware;
 - notes from bring-up.
 
-日本語の詳しい経緯は [`docs/ja/`](docs/ja/) にあります。
+日本語版: [README-ja.md](README-ja.md)
 
 > **Warning:** Experimental. It runs untested power, clock and display code on real
 > hardware. Nothing here writes to the eMMC, but use it at your own risk. CPU
@@ -49,7 +49,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 | `Tools/uefi/package-R376.sh` | The script the tested image was built with (paths are those of the original setup). |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Windows drivers: sources (`Tegra210Gpio`, `Tegra210I2c`, `Switch*`), installable kits (`Switch-*`, test-signed), the build script, the tray app and the login fix. |
-| `docs/ja/` | Bring-up notes and per-revision results (Japanese). |
+| `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
 
 ## Building the UEFI payload
 

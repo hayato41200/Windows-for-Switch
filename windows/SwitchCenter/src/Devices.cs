@@ -107,4 +107,104 @@ namespace SwitchCenter
             return k?.GetValue(name) is int v ? v : null;
         }
     }
+
+    /// <summary>Battery and USB-C state from switchbattery.sys (updated every 10 s / on change).</summary>
+    sealed class BatteryInfo
+    {
+        // BATTERY_STATUS.PowerState bits
+        const int OnLine = 1, Discharging = 2, Charging = 4;
+
+        public int? Percent, Millivolts, PowerState, UsbcState;
+
+        public static BatteryInfo Read() => new BatteryInfo
+        {
+            Percent = DriverTrace.Get("switchbattery", "LastCapacity"),
+            Millivolts = DriverTrace.Get("switchbattery", "LastVoltage"),
+            PowerState = DriverTrace.Get("switchbattery", "LastPowerState"),
+            // UsbcState is written on changes only; before the first change the start state applies.
+            UsbcState = DriverTrace.Get("switchbattery", "UsbcState") ?? DriverTrace.Get("switchbattery", "UsbcStartState"),
+        };
+
+        public string PowerText => PowerState is not int s ? Lang.T("不明", "unknown")
+            : (s & Charging) != 0 ? Lang.T("AC・充電中", "AC, charging")
+            : (s & OnLine) != 0 ? Lang.T("AC（充電していない）", "AC, not charging")
+            : (s & Discharging) != 0 ? Lang.T("バッテリー", "battery") : Lang.T("不明", "unknown");
+
+        public string UsbcText => UsbcState switch
+        {
+            0 => Lang.T("何もつながっていない", "nothing attached"),
+            1 => Lang.T("機器（本体から 5V）", "device (Switch supplies 5 V)"),
+            2 => Lang.T("充電器・ハブ", "charger / hub"),
+            _ => Lang.T("不明", "unknown"),
+        };
+    }
+
+    /// <summary>CPU usage (total and per core) and memory use, from deltas between two Sample() calls.</summary>
+    sealed class SystemUsage
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        struct ProcessorTimes          // SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
+        {
+            public long Idle, Kernel, User, Dpc, Interrupt;
+            public uint InterruptCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct MemoryStatus            // MEMORYSTATUSEX
+        {
+            public uint Length, Load;
+            public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual;
+        }
+
+        [DllImport("ntdll.dll")]
+        static extern int NtQuerySystemInformation(int infoClass, [Out] ProcessorTimes[] info, int length, out int returned);
+
+        [DllImport("kernel32.dll")]
+        static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
+
+        const int SystemProcessorPerformanceInformation = 8;
+        ProcessorTimes[] previous;
+
+        /// <summary>Total CPU usage in percent (null on the first call), per core, and memory.</summary>
+        public int? Total { get; private set; }
+        public int[] PerCore { get; private set; } = Array.Empty<int>();
+        public int MemoryUsedMb { get; private set; }
+        public int MemoryTotalMb { get; private set; }
+
+        public void Sample()
+        {
+            var now = new ProcessorTimes[Environment.ProcessorCount];
+            if (NtQuerySystemInformation(SystemProcessorPerformanceInformation, now, now.Length * Marshal.SizeOf<ProcessorTimes>(), out _) == 0)
+            {
+                if (previous != null)
+                {
+                    long busySum = 0, allSum = 0;
+                    var cores = new int[now.Length];
+                    for (int i = 0; i < now.Length; i++)
+                    {
+                        long all = (now[i].Kernel - previous[i].Kernel) + (now[i].User - previous[i].User);   // kernel includes idle
+                        long busy = all - (now[i].Idle - previous[i].Idle);
+                        cores[i] = all > 0 ? (int)Math.Clamp(busy * 100 / all, 0, 100) : 0;
+                        busySum += busy;
+                        allSum += all;
+                    }
+                    PerCore = cores;
+                    Total = allSum > 0 ? (int)Math.Clamp(busySum * 100 / allSum, 0, 100) : 0;
+                }
+                previous = now;
+            }
+            var mem = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
+            if (GlobalMemoryStatusEx(ref mem))
+            {
+                MemoryTotalMb = (int)(mem.TotalPhys / (1024 * 1024));
+                MemoryUsedMb = (int)((mem.TotalPhys - mem.AvailPhys) / (1024 * 1024));
+            }
+        }
+    }
+
+    /// <summary>Fan duty from switchfan.sys (0..236; 236 = 100 %).</summary>
+    static class FanInfo
+    {
+        public static int? Percent => DriverTrace.Get("switchfan", "Duty") is int d ? d * 100 / 236 : null;
+    }
 }

@@ -1,7 +1,8 @@
 # Switch control center (SwitchCenter)
 
-Notification-area app for the Switch drivers. Stage 1: CPU profile and screen
-brightness from the tray menu (replaces `Switch-ClockTray/SwitchClock.exe`).
+Notification-area app and window for the Switch drivers: CPU profile, screen
+brightness, an overview (clock, usage, temperatures, memory, battery, USB-C, 5-min chart),
+Japanese and English UI. Replaces `Switch-ClockTray/SwitchClock.exe`.
 Design (Japanese): `../Design-ControlCenter-ja.md`.
 
 Build (needs the .NET SDK, any version that can target .NET 8):

@@ -401,6 +401,7 @@ static VOID SwBatUsbcStart(PSWBAT_DEVICE Dev)
         Dev->Usbc = UsbcSink;                       /* UEFI R363 already configured charging */
     }
     SwBatTrace(L"UsbcStartState", Dev->Usbc);
+    SwBatTrace(L"UsbcState", Dev->Usbc);           /* v5: otherwise a value from an earlier boot stays */
     SwBatTrace(L"UsbcStartReg01", Pwr);
 }
 
@@ -814,7 +815,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
         RtlCopyMemory(&SwBatParamsPath[RegistryPath->Length / sizeof(WCHAR)], L"\\Parameters", sizeof(L"\\Parameters"));
         (VOID)RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, SwBatParamsPath);
     }
-    SwBatTrace(L"DriverVersion", 4);
+    SwBatTrace(L"DriverVersion", 5);
 
     WDF_DRIVER_CONFIG_INIT(&Config, SwBatEvtDeviceAdd);
     return WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &Config, WDF_NO_HANDLE);

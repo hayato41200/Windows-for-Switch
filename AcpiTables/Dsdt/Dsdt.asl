@@ -361,5 +361,23 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R377: real-time clock for switchrtc.sys (ACPI\SWOA0801). MAX77620 RTC
+        // block at I2C5 0x68. The driver only reads it and keeps its own offset,
+        // so the time Horizon keeps in the RTC is left alone.
+        Device (RTC0)
+        {
+            Name (_HID, "SWOA0801")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                I2cSerialBusV2 (0x0068, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
     } // Scope(_SB)
 }

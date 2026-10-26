@@ -31,13 +31,13 @@ English: [README.md](README.md)
 | 電源ボタン（画面オフ、ロック） | `switchpwrbtn.sys`（MAX77620 の EN0） |
 | バッテリー残量、AC、充電中の表示 | `switchbattery.sys`（MAX17050 + BQ24193） |
 | タッチパネル（マルチタッチ、長押し） | UEFI が FTM4 の電源を入れる + `switchtouch.sys` |
+| 再起動しても時計が合っている | `switchrtc.sys` が MAX77620 の RTC を読み、最後の時刻同期で覚えたずれを足す。RTC には書き込まないので、Horizon の時計には影響しない |
 
 **まだできないこと:**
 - GPU による高速化（今は標準の画面ドライバーで描いている）
 - 音声
 - Wi-Fi と Bluetooth
 - Joy-Con のレール
-- 時計（RTC）。今は、起動のたびに決まった日付から始まる。
 - スリープ
 
 ## フォルダーの構成
@@ -48,7 +48,7 @@ English: [README.md](README.md)
 | `Firmware/` | XUSB のファームウェアを置く場所。リポジトリには入っていない（README を参照）。 |
 | `patches/edk2/` | edk2 の `XhciDxe` の修正。非コヒーレントな DMA バッファを write-combine で確保する。 |
 | `patches/coreboot/` | [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) を、今のツールでビルドするための修正。 |
-| `Tools/uefi/package-R376.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
+| `Tools/uefi/package-R377.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
 | `Tools/rcm-mac/` | macOS から shofel2 でペイロードを送る手順。 |
 | `windows/` | Windows のドライバー。<br>・ソース: `Tegra210Gpio`、`Tegra210I2c`、`Switch*`<br>・導入キット: `Switch-*`。テスト署名済み。<br>・ビルド用スクリプト、常駐アプリ、ログインの修正 |
 | `docs/ja/uefi-revisions/` | UEFI の試験イメージごとの説明と、実機での結果。 |
@@ -60,7 +60,7 @@ English: [README.md](README.md)
 3. `NintendoSwitchPkg/NintendoSwitch.dsc` を、AARCH64・GCC5 でビルドする。
 4. `TEGRA210_EFI.fd` を ELF のペイロードに包んで、coreboot の ROM に `fallback/payload` として入れる。
    - coreboot の ROM は、imbushuo/Coreboot に `patches/coreboot` を当ててビルドしたもの。
-   - 正確なコマンドは `Tools/uefi/package-R376.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
+   - 正確なコマンドは `Tools/uefi/package-R377.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
 5. Switch を RCM にして、shofel2 で ROM を送る。
    - Linux から: `shofel2.py cbfs.bin coreboot.rom`
    - macOS から: `Tools/rcm-mac/` を参照。
@@ -80,6 +80,7 @@ English: [README.md](README.md)
    5. タッチ
    6. 電源ボタン
    7. CPU クロック
+   8. 時計（RTC）。入れたあと、ネットにつないだ状態で `Rtc.ps1 -Mode Sync` を1回実行する。
 4. **（任意）常駐アプリを起動する。** `windows/Switch-ClockTray/SwitchClock.exe` を起動すると、通知領域から CPU のプロファイルと画面の明るさを選べる。
 
 Windows 10 ARM64 の Windows PowerShell 5.1 は、x86 として動きます。そのため、各スクリプトは `%windir%\Sysnative` を通して `pnputil` や `bcdedit` を呼んでいます。

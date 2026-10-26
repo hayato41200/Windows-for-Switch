@@ -34,9 +34,9 @@ EDK2 platform package, whose history is kept here). It adds:
 | Power button (display off / lock) | `switchpwrbtn.sys` (MAX77620 EN0) |
 | Battery level, AC, charging | `switchbattery.sys` (MAX17050 + BQ24193) |
 | Touch screen: multi-touch, press-and-hold | UEFI powers the FTM4 + `switchtouch.sys` |
+| Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
-Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, RTC
-(the clock starts from a fixed date), sleep.
+Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, sleep.
 
 ## Repository layout
 
@@ -46,7 +46,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R376.sh` | The script the tested image was built with (paths are those of the original setup). |
+| `Tools/uefi/package-R377.sh` | The script the tested image was built with (paths are those of the original setup). |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Windows drivers: sources (`Tegra210Gpio`, `Tegra210I2c`, `Switch*`), installable kits (`Switch-*`, test-signed), the build script, the tray app and the login fix. |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -59,7 +59,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 3. Build `NintendoSwitchPkg/NintendoSwitch.dsc` for AARCH64 with GCC5.
 4. Wrap `TEGRA210_EFI.fd` as an ELF payload and add it to a coreboot ROM built from
    imbushuo/Coreboot (with `patches/coreboot`), as `fallback/payload`.
-   - `Tools/uefi/package-R376.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
+   - `Tools/uefi/package-R377.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
 5. Send the ROM in RCM with shofel2. From Linux:
    `shofel2.py cbfs.bin coreboot.rom`. For macOS, see `Tools/rcm-mac/`.
 
@@ -81,6 +81,7 @@ The drivers are KMDF 1.15, built with LLVM (clang-cl, lld-link) against the WDK
    5. Touch
    6. Power button
    7. CPU clock
+   8. RTC (then run `Rtc.ps1 -Mode Sync` once with the network up)
 4. Optional: run `windows/Switch-ClockTray/SwitchClock.exe` from the notification area.
    It selects the CPU profile and the screen brightness.
 

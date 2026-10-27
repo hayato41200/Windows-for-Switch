@@ -39,6 +39,12 @@ EDK2 platform package, whose history is kept here). It adds:
 
 Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, sleep.
 
+## Tested OS
+
+- Windows 10 IoT Enterprise LTSC 2021 (build 19044), ARM64
+
+Bring your own Windows image and license. This repository does not contain Windows.
+
 ## Repository layout
 
 | Path | Contents |

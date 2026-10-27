@@ -41,6 +41,12 @@ English: [README.md](README.md)
 - Joy-Con のレール
 - スリープ
 
+## 動作を確かめた OS
+
+- Windows 10 IoT Enterprise LTSC 2021（ビルド 19044）ARM64
+
+Windows のイメージとライセンスは、各自で用意してください。このリポジトリには、Windows は含まれていません。
+
 ## フォルダーの構成
 
 | 場所 | 内容 |

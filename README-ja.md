@@ -83,6 +83,7 @@ Windows のイメージとライセンスは、各自で用意してください
 - [CTCaer / Hekate](https://github.com/CTCaer/hekate) と Switchroot（L4T）: ファン、タッチパネル、バックライト、PMIC、充電 IC のレジスタの手順
 - Linux カーネルの Tegra 向けドライバーとデバイスツリー（CPU の CVB 表など）
 - fail0verflow: shofel2
+- Claude: このGithubリポジトリの管理やREADMEの作成
 
 ## ライセンス
 

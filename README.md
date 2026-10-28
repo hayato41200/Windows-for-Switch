@@ -85,7 +85,7 @@ update the drivers over the air.
   sequences for the fan, touch panel, backlight, PMIC and charger.
 - The Linux kernel Tegra drivers and device trees, e.g. the CPU CVB tables.
 - fail0verflow: shofel2.
-- Claude:　Thank you for managing this GitHub repository and writing the README.
+- Claude: Thank you for managing this GitHub repository and writing the README.
 
 ## License
 

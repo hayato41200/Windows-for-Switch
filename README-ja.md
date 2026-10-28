@@ -2,9 +2,9 @@
 
 ![Windows for Switch](docs/images/social-preview.png)
 
-初代 Nintendo Switch（Tegra210「Erista」）で Windows 10 on ARM を動かすプロジェクトです。
+初代 Nintendo Switch（Tegra210「Erista」）で Windows on ARM を動かすプロジェクトです。
 - **対象の本体:** RCM に入れられる未対策の本体だけです。
-- **Windows:** Windows 10 IoT Enterprise LTSC 2021（build 19044、ARM64）を使います。
+- **Windows:** Windows 11 Arm64 22H2（build 22621）で動作を確かめています。
 - **起動のしかた:** coreboot と EDK2 の UEFI を使い、microSD から起動します。
 
 このリポジトリは、[imbushuo/NintendoSwitchPkg](https://github.com/imbushuo/NintendoSwitchPkg)（EDK2 のプラットフォームパッケージ）の続きとして作っています。元の履歴は、そのまま残しています。このリポジトリで足したものは次のとおりです。
@@ -43,7 +43,7 @@ English: [README.md](README.md)
 
 ## 動作を確かめた OS
 
-- Windows 10 IoT Enterprise LTSC 2021（ビルド 19044）ARM64
+- Windows 11 Arm64 22H2（ビルド 22621）
 
 Windows のイメージとライセンスは、各自で用意してください。このリポジトリには、Windows は含まれていません。
 

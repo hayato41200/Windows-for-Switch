@@ -2,7 +2,7 @@
 
 ![Windows for Switch](docs/images/social-preview.png)
 
-Windows 10 on ARM (Windows 10 IoT Enterprise LTSC 2021, build 19044, ARM64) on the
+Windows on ARM (ARM64) on the
 original Nintendo Switch (Tegra210 "Erista", unpatched units that can enter RCM),
 booted from microSD with coreboot + EDK2 UEFI.
 
@@ -41,7 +41,7 @@ Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, 
 
 ## Tested OS
 
-- Windows 10 IoT Enterprise LTSC 2021 (build 19044), ARM64
+- Windows 11 Arm64 22H2 (build 22621)
 
 Bring your own Windows image and license. This repository does not contain Windows.
 

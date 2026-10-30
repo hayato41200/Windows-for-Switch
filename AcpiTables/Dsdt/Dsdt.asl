@@ -142,9 +142,15 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
                 }
             })
 
+            // R389: hidden unless UsbPowerAuditDxe brought XUSB up. It patches
+            // this byte (AML 08 'XSTA' 0A 10) to 0x0F and fixes the checksum.
+            // usbxhci touching an XUSB that was never started froze Windows
+            // at the logo (hekate chain, when the charger set-up stopped).
+            Name (XSTA, 0x10)
+
             Method (_STA, 0, NotSerialized)
             {
-                Return (0x0F)
+                Return (XSTA)
             }
         }
 
@@ -184,13 +190,16 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
         {
             Name (_HID, "ACPI0011")    // R369: ACPI 6.0 Generic Buttons Device (hidinterrupt.inf)
             Name (_UID, Zero)
+            // R389: debounce 20 ms (units of 10 us). With 0 a bounce could
+            // swallow the release edge, and Windows auto-repeated the key to
+            // the volume limit. tegra210gpio asks GpioClx to emulate it.
             Name (_CRS, ResourceTemplate ()
             {
-                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x07D0, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
                 {
                     190     // PX6: volume up
                 }
-                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x0000, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
+                GpioInt (Edge, ActiveBoth, Exclusive, PullUp, 0x07D0, "\\_SB.GPI0", 0x00, ResourceConsumer, ,)
                 {
                     191     // PX7: volume down
                 }

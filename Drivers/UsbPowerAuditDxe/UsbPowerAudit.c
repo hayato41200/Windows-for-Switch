@@ -8,6 +8,9 @@
 #include <Library/CacheMaintenanceLib.h>
 #include <Library/ArmLib.h>
 #include <Library/BaseMemoryLib.h>
+#include <Library/BaseLib.h>
+#include <Guid/Acpi.h>
+#include <IndustryStandard/Acpi.h>
 #include <Library/I2cLib.h>
 #include <Library/NonDiscoverableDeviceRegistrationLib.h>
 #include <Protocol/ComponentName2.h>
@@ -2405,6 +2408,53 @@ STATIC BOOLEAN R362ApplyHostPadctl (VOID) {
 STATIC VOID R363PrintPower (CONST CHAR16 *Tag);
 STATIC VOID R366PrintFan (CONST CHAR16 *Tag, UINT32 Seconds);
 STATIC VOID R373PrintTouch (VOID);
+STATIC VOID R386PrintGpioIrq (VOID);
+
+// R389: the DSDT keeps XHC0 hidden (Name (XSTA, 0x10), AML 08 'XSTA' 0A 10)
+// until XUSB is really running; then set it to 0x0F here and fix the DSDT
+// checksum. Windows froze at the logo when usbxhci met an XUSB that this
+// driver never started (hekate chain, charger set-up stopped early).
+STATIC VOID R389ShowXhciToOs (VOID) {
+  EFI_ACPI_2_0_ROOT_SYSTEM_DESCRIPTION_POINTER *Rsdp = NULL;
+  EFI_ACPI_DESCRIPTION_HEADER *Xsdt, *Table, *Dsdt = NULL;
+  EFI_ACPI_2_0_FIXED_ACPI_DESCRIPTION_TABLE *Fadt;
+  CONST UINT8 Pattern[7] = { 0x08, 'X', 'S', 'T', 'A', 0x0A, 0x10 };
+  UINT8 *Aml, Sum = 0;
+  UINTN Entries, I;
+
+  if (EFI_ERROR (EfiGetSystemConfigurationTable (&gEfiAcpi20TableGuid, (VOID **)&Rsdp)) || Rsdp == NULL ||
+      Rsdp->XsdtAddress == 0) {
+    Print (L"R389 XHC0: no ACPI 2.0 RSDP/XSDT; left hidden\r\n");
+    return;
+  }
+  Xsdt = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)Rsdp->XsdtAddress;
+  Entries = (Xsdt->Length - sizeof (*Xsdt)) / sizeof (UINT64);
+  for (I = 0; I < Entries && Dsdt == NULL; ++I) {
+    Table = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)ReadUnaligned64 ((UINT64 *)((UINT8 *)Xsdt + sizeof (*Xsdt) + I * 8));
+    if (Table->Signature == EFI_ACPI_2_0_FIXED_ACPI_DESCRIPTION_TABLE_SIGNATURE) {
+      Fadt = (EFI_ACPI_2_0_FIXED_ACPI_DESCRIPTION_TABLE *)Table;
+      Dsdt = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)(Fadt->XDsdt != 0 ? Fadt->XDsdt : Fadt->Dsdt);
+    }
+  }
+  if (Dsdt == NULL) {
+    Print (L"R389 XHC0: no DSDT; left hidden\r\n");
+    return;
+  }
+  Aml = (UINT8 *)Dsdt;
+  for (I = sizeof (*Dsdt); I + sizeof (Pattern) <= Dsdt->Length; ++I) {
+    if (CompareMem (&Aml[I], Pattern, sizeof (Pattern)) == 0) {
+      Aml[I + 6] = 0x0F;
+      Dsdt->Checksum = 0;
+      for (I = 0; I < Dsdt->Length; ++I) Sum = (UINT8)(Sum + Aml[I]);
+      Dsdt->Checksum = (UINT8)(0 - Sum);
+      Print (L"R389 XHC0: XUSB running, shown to the OS (DSDT patched)\r\n");
+      return;
+    }
+  }
+  Print (L"R389 XHC0: XSTA not found in the DSDT; left as built\r\n");
+}
+STATIC VOID R388PrintXusbClocks (CONST CHAR16 *Tag);
+STATIC VOID R388PrintXusbState (VOID);
 
 // R362: periodic read-only report of what the stock USB stack found. Runs a
 // few times after ConnectController so UsbBus can enumerate in between.
@@ -2474,6 +2524,7 @@ STATIC VOID EFIAPI R362UsbStatus (EFI_EVENT Event, VOID *Context) {
   }
 
   if (mR362StatusRound >= 4) {
+    R388PrintXusbState ();
     gBS->SetTimer (Event, TimerCancel, 0);
     gBS->CloseEvent (Event);
     mR362StatusEvent = NULL;
@@ -2620,6 +2671,7 @@ STATIC BOOLEAN R362ProductionAttach (volatile UINT32 *Hcd, UINT32 OpBase,
          Hcd[OpBase + (0x400 + 0x10 * 4) / 4]);
   mR362Attached = (Usb2Hc != NULL);
   if (mR362Attached) {
+    R389ShowXhciToOs ();
     mR300Gate = R300_GATE_DONE;
     mR362StatusRound = 0;
     if (!EFI_ERROR (gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
@@ -3400,6 +3452,14 @@ STATIC VOID R366StartFan (VOID) {
     Print (L"R366 PWM clock enabled: clk=%u reset=%u SRC=%08x\r\n",
            (Car[CAR_CLK_OUT_ENB_L / 4] & CLK_L_PWM_BIT) != 0,
            (Car[CAR_RST_DEVICES_L / 4] & CLK_L_PWM_BIT) != 0, Car[CAR_CLK_SOURCE_PWM / 4]);
+  } else if (Car[CAR_CLK_SOURCE_PWM / 4] != ((6U << 29) | 4U)) {
+    // R389: hekate leaves the PWM running from its own clock source. The
+    // backlight then flickered under Windows (switchfan.sys assumes this
+    // rate), so set the coreboot-chain source without resetting the PWM.
+    UINT32 OldSrc = Car[CAR_CLK_SOURCE_PWM / 4];
+    Car[CAR_CLK_SOURCE_PWM / 4] = (6U << 29) | 4U;
+    Print (L"R389 PWM clock source %08x -> %08x (left running by the previous loader)\r\n",
+           OldSrc, Car[CAR_CLK_SOURCE_PWM / 4]);
   }
 
   // Tachometer input: PS7 as GPIO input with pull-up.
@@ -4043,12 +4103,13 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R379 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R389 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
   Print (L"charger already connected (Switch charges, still USB host). No PC.\r\n");
   Print (L"XUSB, PADCTL and power settings are left running for the stock USB stack.\r\n\r\n");
+  R388PrintXusbClocks (L"start");
   ZeroMem (mR293Car, sizeof (mR293Car));
   CaptureR293Car (R293_EARLY);
 
@@ -4071,6 +4132,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R376BacklightPwm ();
   R373TouchPowerOn ();
   R379SensorsPowerOn ();
+  R386PrintGpioIrq ();
 
   if (!R288Read16 (BM_FW_TYPE, &FwType, &S) ||
       !R288Read16 (BM_FW_REV, &FwRev, &S) ||
@@ -5204,10 +5266,97 @@ R35Restore:
   Print (L"Take a clear photo, then hold POWER for 12-15 seconds.\r\n");
 }
 
+// R386: hekate (L4T launcher) can hand over GPIO pins with their interrupt
+// enabled. Windows' GPIO driver (boot start) then gets bank interrupts nobody
+// claims, which never clear: an interrupt storm that froze Windows at the logo
+// in the hekate boot chain. Report them on the console, and mask and clear
+// every GPIO interrupt when the OS takes over (no-op after coreboot).
+#define R386_GPIO_BANKS      8
+#define R386_GPIO_INT_STA    0x40U
+#define R386_GPIO_INT_ENB    0x50U
+#define R386_GPIO_INT_CLR    0x70U
+#define R386_GPIO_MASKED     0x80U
+STATIC EFI_EVENT mR386ExitEvent;
+
+STATIC VOID R386PrintGpioIrq (VOID) {
+  UINT32 Bank, Port, Enb, Sta, Count = 0;
+  Print (L"R386 GPIO interrupts enabled at hand-over:");
+  for (Bank = 0; Bank < R386_GPIO_BANKS; ++Bank) {
+    for (Port = 0; Port < 4; ++Port) {
+      volatile UINT32 *P = (volatile UINT32 *)(GPIO_BASE + Bank * 0x100U + Port * 4U);
+      Enb = P[R386_GPIO_INT_ENB / 4] & 0xFFU;
+      Sta = P[R386_GPIO_INT_STA / 4] & 0xFFU;
+      if (Enb != 0) {
+        Print (L" P%c=%02x/%02x", (CHAR16)(L'A' + Bank * 4 + Port), Enb, Sta);
+        ++Count;
+      }
+    }
+  }
+  Print (Count != 0 ? L" (enable/status; masked at ExitBootServices)\r\n" : L" none\r\n");
+}
+
+STATIC VOID EFIAPI R386MaskGpioIrq (IN EFI_EVENT Event, IN VOID *Context) {
+  UINT32 Bank, Port;
+  for (Bank = 0; Bank < R386_GPIO_BANKS; ++Bank) {
+    for (Port = 0; Port < 4; ++Port) {
+      volatile UINT32 *P = (volatile UINT32 *)(GPIO_BASE + Bank * 0x100U + Port * 4U);
+      P[(R386_GPIO_MASKED + R386_GPIO_INT_ENB) / 4] = 0xFF00U;     // all 8 bits of INT_ENB to 0
+      P[R386_GPIO_INT_CLR / 4] = 0xFFU;
+    }
+  }
+}
+
+// R388: Windows froze at the logo in the hekate L4T chain when it got the
+// XHC0 device; the coreboot chain works. Show the XUSB state the firmware got
+// (clocks, partitions, PLLE) and the one it leaves (pads, ports, Falcon,
+// mailbox) on both chains, so the two can be compared from photos.
+#define R388_CAR_RST_U       0x00CU
+#define R388_CAR_CLK_U       0x018U
+#define R388_CAR_PLLE_BASE   0x0E8U
+#define R388_CAR_PLLE_MISC   0x0ECU
+#define R388_CAR_RST_W       0x35CU
+#define R388_CAR_CLK_W       0x364U
+#define R388_CAR_PLLE_AUX    0x48CU
+#define R388_PMC_PG_STATUS   0x038U
+
+STATIC VOID R388PrintXusbClocks (CONST CHAR16 *Tag) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  Print (L"R388 %s: PG=%08x CLK_U/RST_U=%08x/%08x CLK_W/RST_W=%08x/%08x PLLE=%08x/%08x/%08x\r\n", Tag,
+         Pmc[R388_PMC_PG_STATUS / 4], Car[R388_CAR_CLK_U / 4], Car[R388_CAR_RST_U / 4],
+         Car[R388_CAR_CLK_W / 4], Car[R388_CAR_RST_W / 4],
+         Car[R388_CAR_PLLE_BASE / 4], Car[R388_CAR_PLLE_MISC / 4], Car[R388_CAR_PLLE_AUX / 4]);
+}
+
+STATIC VOID R388PrintXusbState (VOID) {
+  volatile UINT32 *Pad = (volatile UINT32 *)XUSB_PAD_BASE;
+  volatile UINT32 *Hcd = (volatile UINT32 *)XUSB_HCD_BASE;
+  volatile UINT32 *Fpci = (volatile UINT32 *)XUSB_FPCI_BASE;
+  UINT32 OpBase = (Hcd[0] & 0xFFU) / 4, Ports = (Hcd[0x04 / 4] >> 24) & 0xFFU, Port, Range, CpuCtl;
+
+  R388PrintXusbClocks (L"end");
+  Print (L"R388 PAD mux=%08x cap=%08x ssmap=%08x elpg=%08x/%08x usb3mux=%08x uphy=%08x\r\n",
+         Pad[0x004 / 4], Pad[0x008 / 4], Pad[0x014 / 4], Pad[0x020 / 4], Pad[0x024 / 4],
+         Pad[0x028 / 4], Pad[0x360 / 4]);
+  Print (L"R388 HC cmd=%08x sts=%08x ports=%u:", Hcd[OpBase], Hcd[OpBase + 1], Ports);
+  for (Port = 0; Port < Ports && Port < 8; ++Port) {
+    Print (L" %08x", Hcd[OpBase + (0x400 + 0x10 * Port) / 4]);
+  }
+  Print (L"\r\n");
+  Range = Fpci[0x41C / 4];
+  Fpci[0x41C / 4] = 0;
+  CpuCtl = Fpci[(0x800 + 0x100) / 4];
+  Fpci[0x41C / 4] = Range;
+  Print (L"R388 FW cpuctl=%08x mbox cmd=%08x in=%08x out=%08x owner=%08x\r\n",
+         CpuCtl, Fpci[0xE4 / 4], Fpci[0xE8 / 4], Fpci[0xEC / 4], Fpci[0xF0 / 4]);
+}
+
 EFI_STATUS EFIAPI UsbPowerAuditEntryPoint (
   IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable) {
-  EFI_STATUS E = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                                   RunTest, SystemTable, &mStartEvent);
+  EFI_STATUS E;
+  gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, R386MaskGpioIrq, NULL, &mR386ExitEvent);
+  E = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
+                        RunTest, SystemTable, &mStartEvent);
   if (EFI_ERROR (E)) return E;
   E = gBS->SetTimer (mStartEvent, TimerRelative, 10ULL * 1000ULL * 1000ULL * 10ULL);
   if (EFI_ERROR (E)) gBS->CloseEvent (mStartEvent);

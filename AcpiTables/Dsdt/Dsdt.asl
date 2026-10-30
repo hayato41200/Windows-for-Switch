@@ -373,6 +373,25 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R390: Bluetooth for switchbt.sys (ACPI\SWOA0B01). BCM4356A3 on UART-D
+        // (GIC SPI 90 = GSI 122, level high). UEFI R390 sets the pins, clocks
+        // the UART and powers the chip (PH4).
+        Device (BTH0)
+        {
+            Name (_HID, "SWOA0B01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x70006300, 0x00000040)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x0000007A }
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
         // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
         // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
         Device (PWRB)

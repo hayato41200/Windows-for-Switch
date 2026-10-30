@@ -3841,6 +3841,123 @@ STATIC VOID R379SensorsPowerOn (VOID) {
          Pulsed ? L"started" : L"already on", Ok ? L"read" : L"FAIL", Id[1]);
 }
 
+// R390: Bluetooth for switchbt.sys. L4T DT: BCM4356A3 (brcm,bcm43438-bt) on
+// serial@70006300 (UART-D, GIC SPI 90); shutdown-gpios PH4 (BT_RST, active
+// high = powered), device-wakeup-gpios PH3 (AP_WAKE_BT, active low = awake);
+// BT_WAKE_AP is PH5. UEFI sets the pins, clocks UART-D from PLLP, powers the
+// chip and checks it answers HCI_Reset and Read_Local_Version at 115200 8N1
+// (the Broadcom ROM default). The chip stays powered for the Windows driver.
+#define UARTD_BASE           0x70006300UL
+#define GPIO_PH_OFFSET       0x10CU      // port H: bank 1, port 3
+#define GPIO_PI_OFFSET       0x200U      // port I: bank 2, port 0
+#define PINMUX_UART4_TX      0x114U
+#define PINMUX_UART4_RX      0x118U
+#define PINMUX_UART4_RTS     0x11CU
+#define PINMUX_UART4_CTS     0x120U
+#define PINMUX_AP_WAKE_BT    0x1C0U
+#define PINMUX_BT_RST        0x1C4U
+#define PINMUX_BT_WAKE_AP    0x1C8U
+#define CAR_CLK_SOURCE_UARTD 0x1C0U
+#define CLK_U_UARTD_BIT      (1U << 1)
+#define UART_THR             (0x00U / 4)
+#define UART_IER             (0x04U / 4)
+#define UART_FCR             (0x08U / 4)
+#define UART_LCR             (0x0CU / 4)
+#define UART_MCR             (0x10U / 4)
+#define UART_LSR             (0x14U / 4)
+#define UART_DLL             (0x00U / 4)
+#define UART_DLM             (0x04U / 4)
+#define UART_LSR_DR          (1U << 0)
+#define UART_LSR_THRE        (1U << 5)
+#define UART_DIV_115200      221U        // 408 MHz / 16 / 221 = 115384 baud
+
+STATIC VOID R390UartSend (CONST UINT8 *Buf, UINTN Len) {
+  volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
+  UINTN I, T;
+  for (I = 0; I < Len; ++I) {
+    for (T = 0; T < 10000 && (U[UART_LSR] & UART_LSR_THRE) == 0; ++T) gBS->Stall (1);
+    U[UART_THR] = Buf[I];
+  }
+}
+
+// Reads one HCI event (04 code len params) within TimeoutMs; returns its length.
+STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
+  volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
+  UINTN Got = 0, Need = 3, T;
+  for (T = 0; T < TimeoutMs * 100 && Got < Need; ) {
+    if ((U[UART_LSR] & UART_LSR_DR) == 0) { gBS->Stall (10); ++T; continue; }
+    UINT8 B = (UINT8)U[UART_THR];
+    if (Got == 0 && B != 0x04U) continue;              // skip anything before an event
+    if (Got < Max) Buf[Got] = B;
+    if (++Got == 3) Need = 3U + B;
+  }
+  return Got >= Need ? Got : 0;
+}
+
+STATIC VOID R390BluetoothPowerOn (VOID) {
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
+  CONST UINT8 Reset[4] = { 0x01, 0x03, 0x0C, 0x00 };
+  CONST UINT8 Version[4] = { 0x01, 0x01, 0x10, 0x00 };
+  UINT8 Ev[32];
+  UINTN Len, I;
+  BOOLEAN Pulsed;
+
+  // UART-D pins as in the L4T pinmux (function 0 = UARTD), to the controller.
+  Pin[PINMUX_UART4_TX / 4] = PINMUX_PULL_DOWN_BITS;
+  Pin[PINMUX_UART4_RX / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_TRISTATE_BIT | PINMUX_INPUT_EN_BIT;
+  Pin[PINMUX_UART4_RTS / 4] = PINMUX_PULL_DOWN_BITS;
+  Pin[PINMUX_UART4_CTS / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_TRISTATE_BIT | PINMUX_INPUT_EN_BIT;
+  for (I = 4; I < 8; ++I) R366GpioSet (GPIO_PI_OFFSET, GPIO_CNF, (UINT32)I, FALSE);
+
+  // Power control pins as GPIOs: BT_RST low (off) first, AP_WAKE_BT low (awake).
+  Pin[PINMUX_AP_WAKE_BT / 4] = 0;
+  Pin[PINMUX_BT_RST / 4] = 0;
+  Pin[PINMUX_BT_WAKE_AP / 4] = PINMUX_TRISTATE_BIT | PINMUX_INPUT_EN_BIT;
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 4, FALSE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 3, FALSE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 4, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 3, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 5, FALSE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_CNF, 4, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_CNF, 3, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_CNF, 5, TRUE);
+  gBS->Stall (20000);
+
+  // UART-D from PLLP (408 MHz, no clock divider), 115200 8N1, FIFOs on, RTS on.
+  Pulsed = R379ClockOn (CAR_CLK_OUT_ENB_U, CAR_RST_DEVICES_U, CAR_CLK_ENB_U_SET, CAR_RST_DEV_U_SET,
+                        CAR_RST_DEV_U_CLR, CLK_U_UARTD_BIT, CAR_CLK_SOURCE_UARTD, 0);
+  U[UART_IER] = 0;
+  U[UART_LCR] = 0x80U;
+  U[UART_DLL] = UART_DIV_115200 & 0xFFU;
+  U[UART_DLM] = UART_DIV_115200 >> 8;
+  U[UART_LCR] = 0x03U;
+  U[UART_FCR] = 0x07U;
+  U[UART_MCR] = 0x02U;
+
+  // Power the chip; the ROM needs some time before it listens.
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 4, TRUE);
+  gBS->Stall (150000);
+  while ((U[UART_LSR] & UART_LSR_DR) != 0) (VOID)U[UART_THR];
+
+  R390UartSend (Reset, sizeof (Reset));
+  Len = R390UartEvent (Ev, sizeof (Ev), 500);
+  if (Len < 7) {
+    Print (L"R390 Bluetooth: UART-D clock %s, BT powered, HCI_Reset NO ANSWER (wake PH5=%u)\r\n",
+           Pulsed ? L"started" : L"already on", R366GpioBit (GPIO_PH_OFFSET, GPIO_IN, 5));
+    return;
+  }
+  R390UartSend (Version, sizeof (Version));
+  Len = R390UartEvent (Ev, sizeof (Ev), 500);
+  if (Len < 15 || Ev[1] != 0x0EU || Ev[6] != 0x00U) {
+    Print (L"R390 Bluetooth: HCI_Reset ok, Read_Local_Version FAIL (len %u)\r\n", (UINT32)Len);
+    return;
+  }
+  // 04 0E 0C 01 01 10 status hci_ver hci_rev(2) lmp_ver manufacturer(2) lmp_subver(2)
+  Print (L"R390 Bluetooth: HCI ok, HCI %02x rev %04x LMP %02x maker %04x subver %04x (maker 000f = Broadcom)\r\n",
+         Ev[7], Ev[8] | (Ev[9] << 8), Ev[10], Ev[11] | (Ev[12] << 8), Ev[13] | (Ev[14] << 8));
+}
+
 // Raise VDD_CPU first, park CCLK on PLLP (408 MHz), reprogram and relock
 // PLLX, then return CCLK to PLLX. Any failure puts the old PLLX/voltage back.
 STATIC VOID R364RaiseCpuClock (VOID) {
@@ -4103,7 +4220,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R389 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R390 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4132,6 +4249,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R376BacklightPwm ();
   R373TouchPowerOn ();
   R379SensorsPowerOn ();
+  R390BluetoothPowerOn ();
   R386PrintGpioIrq ();
 
   if (!R288Read16 (BM_FW_TYPE, &FwType, &S) ||

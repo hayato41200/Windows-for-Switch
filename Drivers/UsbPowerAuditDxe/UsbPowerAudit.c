@@ -3936,6 +3936,8 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
 #define CAR_CLK_SOURCE_EXT1  0x3ECU
 #define CAR_CLK_SOURCE_APE   0x6C0U
 
+STATIC BOOLEAN mR395CodecAnswers;
+
 STATIC BOOLEAN R393CodecRead16 (UINT8 Reg, UINT16 *Value) {
   UINT8 Buf[2] = { 0, 0 };
   if (i2c_recv_buf_small (Buf, 2, I2C_1, RT5639_ADDR, Reg) == 0) {
@@ -3975,6 +3977,7 @@ STATIC VOID R393AudioProbe (VOID) {
     Ok3 = R393CodecRead16 (RT5640_RESET, &Reset);
     Print (L"R394 audio codec: I2C1 0x1C %s after %u tries VENDOR_ID1=%04x (10ec = Realtek) ID2=%04x reg00=%04x\r\n",
            Ok1 ? L"answers" : L"NO ANSWER", (UINT32)Try, Id1, Id2, Reset);
+    mR395CodecAnswers = Ok1 && Id2 == 0x6231U;
   }
   (VOID)Ok3;
   Print (L"R393 audio state (read only): APE partition %s  CLK_L=%08x CLK_V=%08x CLK_Y=%08x PLLA=%08x\r\n",
@@ -3984,6 +3987,197 @@ STATIC VOID R393AudioProbe (VOID) {
          Car[CAR_CLK_SOURCE_I2S1 / 4], Car[CAR_CLK_SOURCE_EXT1 / 4], Car[CAR_CLK_SOURCE_APE / 4],
          (Car[CAR_CLK_OUT_ENB_L / 4] >> 11) & 1U, (Car[CAR_CLK_OUT_ENB_V / 4] >> 11) & 1U,
          (Car[CAR_CLK_OUT_ENB_V / 4] >> 24) & 1U, (Car[CAR_CLK_OUT_ENB_Y / 4] >> 6) & 1U);
+}
+
+// R395: audio, step 2: a 1 kHz tone on the speaker for one second at boot.
+// Tegra is the I2S master (the L4T DT makes the codec master, but then MCLK
+// needs PLLA and the AUD_MCLK path): I2S1 from clk_m with the CAR divider
+// gives BCLK = 32 x 48 kHz = 1.536 MHz exactly, and the codec makes its
+// 24.576 MHz sysclk from BCLK1 with its own PLL. The data path is
+// ADMAIF1 TX (written by the CPU, no ADMA yet) -> XBAR -> I2S1 RX CIF ->
+// DAP1 -> codec AIF1 -> DAC L1/R1 -> SPK MIX -> SPKVOL -> SPO L/R (class D).
+// Register values follow Linux tegra210_i2s/admaif/ahub and rt5640.
+#define APE_ADMAIF_BASE      0x702D0000UL
+#define APE_XBAR_BASE        0x702D0800UL
+#define APE_I2S1_BASE        0x702D1000UL
+#define ADMAIF_GLOBAL_ENABLE 0x700U
+#define ADMAIF_TX1_ENABLE    0x300U
+#define ADMAIF_TX1_STATUS    0x30CU
+#define ADMAIF_TX1_ACIF_CTRL 0x320U
+#define ADMAIF_TX1_FIFO_CTRL 0x328U
+#define ADMAIF_TX1_FIFO_WRITE 0x32CU
+#define XBAR_I2S1_RX_MUX     0x040U      // MUX_REG(0x10); parts at +0x200, +0x400
+#define I2S_RX_ENABLE        0x00U
+#define I2S_RX_STATUS        0x0CU
+#define I2S_RX_CIF_CTRL      0x20U
+#define I2S_RX_CTRL          0x24U
+#define I2S_RX_CIF_FIFO_STATUS 0x34U
+#define I2S_ENABLE           0x80U
+#define I2S_CTRL             0xA0U
+#define I2S_TIMING           0xA4U
+#define ACIF_16BIT_STEREO    ((1U << 20) | (1U << 16) | (3U << 12) | (3U << 8))
+#define CAR_SPARE_REG0       0x55CU
+#define CLK_L_I2S1_BIT       (1U << 11)
+#define GPIO_PB_OFFSET       0x004U      // port B: bank 0, port 1
+#define PINMUX_DAP1_FS       0x124U
+#define PINMUX_DAP1_DIN      0x128U
+#define PINMUX_DAP1_DOUT     0x12CU
+#define PINMUX_DAP1_SCLK     0x130U
+#define RT5640_SPK_VOL       0x01
+#define RT5640_STO_DAC_MIXER 0x2A
+#define RT5640_SPK_L_MIXER   0x46
+#define RT5640_SPK_R_MIXER   0x47
+#define RT5640_SPO_L_MIXER   0x48
+#define RT5640_SPO_R_MIXER   0x49
+#define RT5640_PWR_DIG1      0x61
+#define RT5640_PWR_ANLG1     0x63
+#define RT5640_PWR_ANLG2     0x64
+#define RT5640_PWR_MIXER     0x65
+#define RT5640_PWR_VOL       0x66
+#define RT5640_PRIV_INDEX    0x6A
+#define RT5640_PRIV_DATA     0x6C
+#define RT5640_I2S1_SDP      0x70
+#define RT5640_GLB_CLK       0x80
+#define RT5640_PLL_CTRL1     0x81
+#define RT5640_PLL_CTRL2     0x82
+#define RT5640_MICBIAS       0x93
+#define RT5640_DUMMY1        0xFA
+
+STATIC BOOLEAN R395CodecWrite (UINT8 Reg, UINT16 Value) {
+  UINT8 Buf[2] = { (UINT8)(Value >> 8), (UINT8)Value };
+  return i2c_send_buf_small (I2C_1, RT5639_ADDR, Reg, Buf, 2) != 0;
+}
+
+STATIC BOOLEAN R395CodecUpdate (UINT8 Reg, UINT16 Clear, UINT16 Set) {
+  UINT16 Value = 0;
+  if (!R393CodecRead16 (Reg, &Value)) return FALSE;
+  return R395CodecWrite (Reg, (UINT16)((Value & ~Clear) | Set));
+}
+
+// The codec's speaker path for AIF1 playback, slave with sysclk = PLL1 from BCLK1.
+STATIC BOOLEAN R395CodecSetup (VOID) {
+  STATIC CONST UINT16 Private[][2] = {      // rt5640 init_list
+    { 0x3D, 0x3600 }, { 0x12, 0x0AA8 }, { 0x14, 0x0AAA }, { 0x21, 0xE0E0 }, { 0x23, 0x1804 },
+  };
+  BOOLEAN Ok = TRUE;
+  UINTN Index;
+
+  Ok &= R395CodecWrite (RT5640_RESET, 0);
+  gBS->Stall (10000);
+  for (Index = 0; Index < ARRAY_SIZE (Private); ++Index) {
+    Ok &= R395CodecWrite (RT5640_PRIV_INDEX, Private[Index][0]);
+    Ok &= R395CodecWrite (RT5640_PRIV_DATA, Private[Index][1]);
+  }
+  // Bias (rt5640_set_bias_level STANDBY): VREF1, MB, BG, VREF2; then fast VREF.
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, 0, (1U << 15) | (1U << 13) | (1U << 11) | (1U << 4));
+  gBS->Stall (15000);
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, 0, (1U << 14) | (1U << 3));
+  Ok &= R395CodecUpdate (RT5640_DUMMY1, 0, 0x0001);
+  Ok &= R395CodecUpdate (RT5640_MICBIAS, 0, 0x0030);
+  // Clocks: PLL1 from BCLK1, N = 62, K = 2, M bypassed: 1.536 MHz x 64 / 4 = 24.576 MHz.
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG2, 0, 1U << 9);
+  Ok &= R395CodecWrite (RT5640_PLL_CTRL1, (UINT16)((62U << 7) | 2U));
+  Ok &= R395CodecWrite (RT5640_PLL_CTRL2, 1U << 11);
+  Ok &= R395CodecWrite (RT5640_GLB_CLK, (1U << 14) | (1U << 12));
+  // AIF1: slave, I2S, 16 bit (reset default 0x8000); ADDA_CLK1 keeps pre-div /2 and BCLK 32 fs (0x1114).
+  Ok &= R395CodecWrite (RT5640_I2S1_SDP, 0x8000);
+  // Power: I2S1, DAC L1/R1, class D amp.
+  Ok &= R395CodecUpdate (RT5640_PWR_DIG1, 0, (1U << 15) | (1U << 12) | (1U << 11) | 1U);
+  // Mixers: DAC L1/R1 into the stereo DAC mixer, DAC into SPK MIX, SPKVOL into SPO L/R.
+  Ok &= R395CodecUpdate (RT5640_STO_DAC_MIXER, (1U << 14) | (1U << 6), 0);
+  Ok &= R395CodecUpdate (RT5640_SPK_L_MIXER, 1U << 3, 0);
+  Ok &= R395CodecUpdate (RT5640_SPK_R_MIXER, 1U << 3, 0);
+  Ok &= R395CodecUpdate (RT5640_SPO_L_MIXER, 1U << 12, 0);
+  Ok &= R395CodecUpdate (RT5640_SPO_R_MIXER, 1U << 12, 0);
+  Ok &= R395CodecUpdate (RT5640_PWR_MIXER, 0, (1U << 13) | (1U << 12));
+  Ok &= R395CodecUpdate (RT5640_PWR_VOL, 0, (1U << 15) | (1U << 14));
+  // Speaker volume -12 dB (8 steps of 1.5 dB), unmuted.
+  Ok &= R395CodecWrite (RT5640_SPK_VOL, 0x0808);
+  return Ok;
+}
+
+STATIC VOID R395AudioTone (VOID) {
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Admaif = (volatile UINT32 *)APE_ADMAIF_BASE;
+  volatile UINT32 *Xbar = (volatile UINT32 *)APE_XBAR_BASE;
+  volatile UINT32 *I2s = (volatile UINT32 *)APE_I2S1_BASE;
+  // 1 kHz at 48 kHz: one period is 48 samples; amplitude 1/8 of full scale.
+  STATIC CONST INT16 Sine[48] = {
+        0,   535,  1060,  1567,  2048,  2493,  2896,  3250,  3547,  3784,  3956,  4061,
+     4096,  4061,  3956,  3784,  3547,  3250,  2896,  2493,  2048,  1567,  1060,   535,
+        0,  -535, -1060, -1567, -2048, -2493, -2896, -3250, -3547, -3784, -3956, -4061,
+    -4096, -4061, -3956, -3784, -3547, -3250, -2896, -2493, -2048, -1567, -1060,  -535,
+  };
+  UINT32 ClkmKhz, Div, Frame;
+  UINT64 Freq, Next, Step;
+  BOOLEAN CodecOk;
+
+  // clk_m = 38.4 MHz / (SPARE_REG0[3:2] + 1); I2S1 clock = BCLK = 1.536 MHz (7.1 divider).
+  ClkmKhz = 38400U / (((Car[CAR_SPARE_REG0 / 4] >> 2) & 3U) + 1U);
+  Div = (2U * ClkmKhz) / 1536U - 2U;
+  (VOID)R379ClockOn (CAR_CLK_OUT_ENB_L, CAR_RST_DEVICES_L, CAR_CLK_ENB_L_SET, CAR_RST_DEV_L_SET,
+                     CAR_RST_DEV_L_CLR, CLK_L_I2S1_BIT, CAR_CLK_SOURCE_I2S1, (3U << 30) | Div);
+  Car[CAR_CLK_SOURCE_I2S1 / 4] = (3U << 30) | Div;   // clk_m / ((Div + 2) / 2)
+  gBS->Stall (10);
+
+  // DAP1 pins to I2S1 (function 0), Tegra drives SCLK, FS and DOUT.
+  Pin[PINMUX_DAP1_FS / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_INPUT_EN_BIT;
+  Pin[PINMUX_DAP1_SCLK / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_INPUT_EN_BIT;
+  Pin[PINMUX_DAP1_DOUT / 4] = PINMUX_PULL_DOWN_BITS;
+  Pin[PINMUX_DAP1_DIN / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_TRISTATE_BIT | PINMUX_INPUT_EN_BIT;
+  R366GpioSet (GPIO_PB_OFFSET, GPIO_CNF, 0, FALSE);
+  R366GpioSet (GPIO_PB_OFFSET, GPIO_CNF, 1, FALSE);
+  R366GpioSet (GPIO_PB_OFFSET, GPIO_CNF, 2, FALSE);
+  R366GpioSet (GPIO_PB_OFFSET, GPIO_CNF, 3, FALSE);
+
+  // I2S1: master, LRCK (I2S) mode, LRCK low = left, 16 bit, 16 BCLK per channel, data offset 1.
+  I2s[I2S_ENABLE / 4] = 0;
+  I2s[I2S_CTRL / 4] = (1U << 10) | 3U;
+  I2s[I2S_TIMING / 4] = 15U;
+  I2s[I2S_RX_CTRL / 4] = 1U << 8;
+  I2s[I2S_RX_CIF_CTRL / 4] = (3U << 24) | ACIF_16BIT_STEREO;
+  // XBAR: I2S1 takes ADMAIF1.
+  Xbar[XBAR_I2S1_RX_MUX / 4] = 1U;
+  Xbar[(XBAR_I2S1_RX_MUX + 0x200U) / 4] = 0;
+  Xbar[(XBAR_I2S1_RX_MUX + 0x400U) / 4] = 0;
+  // ADMAIF1 TX: 16-bit stereo, written by the CPU.
+  Admaif[ADMAIF_GLOBAL_ENABLE / 4] = 1;
+  Admaif[ADMAIF_TX1_ACIF_CTRL / 4] = ACIF_16BIT_STEREO;
+  Admaif[ADMAIF_TX1_ENABLE / 4] = 1;
+  I2s[I2S_RX_ENABLE / 4] = 1;
+  I2s[I2S_ENABLE / 4] = 1;                     // BCLK and LRCK run from here
+  gBS->Stall (5000);
+
+  CodecOk = R395CodecSetup ();
+  gBS->Stall (50000);                          // codec PLL lock, amp start
+  Print (L"R395 audio tone: clk_m=%u kHz I2S1 div=%u CAR=%08x codec setup %s; ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
+         ClkmKhz, Div, Car[CAR_CLK_SOURCE_I2S1 / 4], CodecOk ? L"ok" : L"I2C FAIL",
+         Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
+
+  // One second of tone, paced by the architected counter (one frame every 1/48000 s),
+  // with a few frames ahead so the FIFO never runs dry.
+  Freq = R364CounterFreq ();
+  Step = Freq / 48000U;
+  Next = R364Counter ();
+  for (Frame = 0; Frame < 48000U + 16U; ++Frame) {
+    INT32 Sample = (Frame < 48000U) ? Sine[Frame % 48U] : 0;
+    if (Frame >= 16U) {
+      while (R364Counter () < Next) { }
+      Next += Step;
+    }
+    Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // left
+    Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // right
+  }
+  gBS->Stall (5000);
+  Print (L"R395 audio tone: done; ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
+         Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
+
+  // Quiet again: speaker muted, I2S and ADMAIF stopped (Windows will set them up itself).
+  (VOID)R395CodecWrite (RT5640_SPK_VOL, 0xC8C8);
+  I2s[I2S_RX_ENABLE / 4] = 0;
+  I2s[I2S_ENABLE / 4] = 0;
+  Admaif[ADMAIF_TX1_ENABLE / 4] = 0;
 }
 
 STATIC VOID R390BluetoothPowerOn (VOID) {
@@ -4329,7 +4523,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R394 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R395 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4360,6 +4554,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R379SensorsPowerOn ();
   R390BluetoothPowerOn ();
   R393AudioProbe ();
+  if (mR395CodecAnswers) R395AudioTone ();
   R386PrintGpioIrq ();
 
   if (!R288Read16 (BM_FW_TYPE, &FwType, &S) ||

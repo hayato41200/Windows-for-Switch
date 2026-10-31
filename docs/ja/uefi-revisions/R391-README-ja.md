@@ -19,7 +19,9 @@ Bluetooth の第3段（switchbt 1.0.0.8：ファームウェアのパッチと 3
 - ROM: `D:\Codex\coreboot-R391.rom`
 - SHA-256: `fe8fe819dab16dc500c9d6a8e2255f40e067164ae91b627e6b1ab7922a6aec7b`
 - `EDK_SOURCE_RESTORE_MATCH=YES`。
-- 実機ではまだ試していない。
+- **実機の結果（2026-10-31）:** `R391 Bluetooth 32k: PMIC AME_GPIO 1C -> 1C … CNFG1_32K 0C`（32 kHz はもともと出ていた）。`HCI_Reset NO ANSWER`。
+  - 原因: CLK_SOURCE_UARTD の bit 24 は細かい分周ではなく、CAR のクロックをそのまま UART の 16 倍のクロックにする切り替え（UART 自身の分周は使われない）。48 MHz にしたので UART は 3 Mbps になり、115200 bps の確認が通らなかった。
+  - **R391 は使わない。** switchbt 1.0.0.9 は UART のクロックを自分で設定するので、R390 で 3 Mbps まで動く。
 
 ## もし起動しなくなったら
 

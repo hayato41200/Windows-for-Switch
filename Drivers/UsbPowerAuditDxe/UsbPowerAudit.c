@@ -3915,6 +3915,65 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
   return Got >= Need ? Got : 0;
 }
 
+// R393: audio, step 1 (can we talk to the codec?). L4T DT: Realtek ALC5639
+// (realtek,rt5639) on I2C1 at 0x1C, ldo1-en-gpios PZ4 (active high), IRQ
+// PBB4; I2S1 to the codec (codec is the bit/frame clock master), MCLK from
+// AUD_MCLK (PBB0). Its jack-detect-gpios names PV6, which is the touch
+// panel's reset here, so it is not touched (the codec's own JD1 is used).
+// This step only powers the codec (PZ4) and reads its vendor ID; the APE
+// partition and the audio clocks are printed, not changed.
+#define GPIO_PZ_OFFSET       0x604U      // port Z: bank 6, port 1
+#define PINMUX_GPIO_PZ4      0x28CU      // pad 163
+#define RT5639_ADDR          0x1C
+#define RT5640_RESET         0x00
+#define RT5640_VENDOR_ID1    0xFE        // 0x10EC (Realtek)
+#define RT5640_VENDOR_ID2    0xFF
+#define PMC_PWRGATE_STATUS   0x38U
+#define PMC_PG_APE_BIT       27U         // TEGRA_POWERGATE_AUD
+#define CAR_CLK_OUT_ENB_V    0x360U
+#define CAR_PLLA_BASE        0x0B0U
+#define CAR_CLK_SOURCE_I2S1  0x100U
+#define CAR_CLK_SOURCE_EXT1  0x3ECU
+#define CAR_CLK_SOURCE_APE   0x6C0U
+
+STATIC BOOLEAN R393CodecRead16 (UINT8 Reg, UINT16 *Value) {
+  UINT8 Buf[2] = { 0, 0 };
+  if (i2c_recv_buf_small (Buf, 2, I2C_1, RT5639_ADDR, Reg) == 0) {
+    return FALSE;
+  }
+  *Value = (UINT16)((Buf[0] << 8) | Buf[1]);     // rt5640 registers are 16-bit, big endian
+  return TRUE;
+}
+
+STATIC VOID R393AudioProbe (VOID) {
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINT16 Id1 = 0, Id2 = 0, Reset = 0;
+  BOOLEAN Ok1, Ok2, Ok3;
+
+  // Codec LDO1 enable: PZ4 as a GPIO output, high (pad as in the L4T pinmux, pull down, driven).
+  Pin[PINMUX_GPIO_PZ4 / 4] = PINMUX_PULL_DOWN_BITS;
+  R366GpioSet (GPIO_PZ_OFFSET, GPIO_OUT, 4, TRUE);
+  R366GpioSet (GPIO_PZ_OFFSET, GPIO_OE, 4, TRUE);
+  R366GpioSet (GPIO_PZ_OFFSET, GPIO_CNF, 4, TRUE);
+  gBS->Stall (20000);
+
+  Ok1 = R393CodecRead16 (RT5640_VENDOR_ID1, &Id1);
+  Ok2 = R393CodecRead16 (RT5640_VENDOR_ID2, &Id2);
+  Ok3 = R393CodecRead16 (RT5640_RESET, &Reset);
+  Print (L"R393 audio codec: I2C1 0x1C %s VENDOR_ID1=%04x (10ec = Realtek) ID2=%04x reg00=%04x\r\n",
+         (Ok1 && Ok2) ? L"answers" : L"NO ANSWER", Id1, Id2, Reset);
+  (VOID)Ok3;
+  Print (L"R393 audio state (read only): APE partition %s  CLK_L=%08x CLK_V=%08x CLK_Y=%08x PLLA=%08x\r\n",
+         ((Pmc[PMC_PWRGATE_STATUS / 4] >> PMC_PG_APE_BIT) & 1U) ? L"on" : L"off",
+         Car[CAR_CLK_OUT_ENB_L / 4], Car[CAR_CLK_OUT_ENB_V / 4], Car[CAR_CLK_OUT_ENB_Y / 4], Car[CAR_PLLA_BASE / 4]);
+  Print (L"R393 audio clocks: I2S1 src=%08x EXTERN1 src=%08x APE src=%08x (i2s1 L11=%u apb2ape V11=%u extern1 V24=%u ape Y6=%u)\r\n",
+         Car[CAR_CLK_SOURCE_I2S1 / 4], Car[CAR_CLK_SOURCE_EXT1 / 4], Car[CAR_CLK_SOURCE_APE / 4],
+         (Car[CAR_CLK_OUT_ENB_L / 4] >> 11) & 1U, (Car[CAR_CLK_OUT_ENB_V / 4] >> 11) & 1U,
+         (Car[CAR_CLK_OUT_ENB_V / 4] >> 24) & 1U, (Car[CAR_CLK_OUT_ENB_Y / 4] >> 6) & 1U);
+}
+
 STATIC VOID R390BluetoothPowerOn (VOID) {
   volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
   volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
@@ -4258,7 +4317,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R392 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R393 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4288,6 +4347,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R373TouchPowerOn ();
   R379SensorsPowerOn ();
   R390BluetoothPowerOn ();
+  R393AudioProbe ();
   R386PrintGpioIrq ();
 
   if (!R288Read16 (BM_FW_TYPE, &FwType, &S) ||

@@ -55,7 +55,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R390.sh`. |
+| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R392.sh`. |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Setup helpers: the login fix and the driver inventory script. The drivers themselves are in [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers). |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -63,22 +63,26 @@ Bring your own Windows image and license. This repository does not contain Windo
 ## Building the UEFI payload
 
 1. Check out edk2 `edk2-stable202102`. Apply `patches/edk2/*.patch` (`patch -p1`).
-2. Put this repository at `edk2/NintendoSwitchPkg`. Add the XUSB firmware as described
-   in `Firmware/README.md`.
+2. Put this repository at `edk2/NintendoSwitchPkg`.
 3. Build `NintendoSwitchPkg/NintendoSwitch.dsc` for AARCH64 with GCC5.
 4. Wrap `TEGRA210_EFI.fd` as an ELF payload and add it to a coreboot ROM built from
    imbushuo/Coreboot (with `patches/coreboot`), as `fallback/payload`.
-   - `Tools/uefi/package-R390.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
-5. Send the ROM in RCM with shofel2. From Linux:
+   - `Tools/uefi/package-R392.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
+5. Put the XUSB (USB host) firmware at the root of the SD card's ESP as `tegra21x_xusb_firmware`
+   (see `Firmware/README.md`). The UEFI reads it from there at every boot; without it USB does not work.
+   For a private build you can embed it instead with `-D EMBED_XUSB_FIRMWARE=TRUE`.
+6. Send the ROM in RCM with shofel2. From Linux:
    `shofel2.py cbfs.bin coreboot.rom`. For macOS, see `Tools/rcm-mac/`.
 
 ## Which UEFI revision
 
-Use R390 (notes: `docs/ja/uefi-revisions/R390-README-ja.md`). Do not use R391: its UART clock setting is wrong.
+Use R392 (notes: `docs/ja/uefi-revisions/R392-README-ja.md`). It is R390 with the XUSB firmware read from the ESP and the Bluetooth UART clock reset at every boot. Do not use R391: its UART clock setting is wrong.
 
 ## No prebuilt ROM
 
-Built ROMs (coreboot + UEFI) are not published. They embed NVIDIA's XUSB firmware, and linux-firmware's `LICENCE.nvidia` allows redistribution only for use on open source operating systems; a ROM for Windows is outside that. Build it with firmware you obtained yourself, as above.
+Built ROMs (coreboot + UEFI) are not published; build your own as above.
+- The coreboot part carries memory-training data from the console (`nx_abca2_0_3.bin`, `tegra_mtc_table_*.bin`), which cannot be redistributed.
+- NVIDIA's XUSB firmware: linux-firmware's `LICENCE.nvidia` allows redistribution only for use on open source operating systems. Since R392 the image does not contain it (unless you embed it yourself), and you supply your own copy on the ESP.
 
 ## Installing the Windows drivers
 

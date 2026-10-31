@@ -57,7 +57,7 @@ Windows のイメージとライセンスは、各自で用意してください
 | `Firmware/` | XUSB のファームウェアを置く場所。リポジトリには入っていない（README を参照）。 |
 | `patches/edk2/` | edk2 の `XhciDxe` の修正。非コヒーレントな DMA バッファを write-combine で確保する。 |
 | `patches/coreboot/` | [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) を、今のツールでビルドするための修正。 |
-| `Tools/uefi/package-R3xx.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。今使う版は `package-R390.sh`。 |
+| `Tools/uefi/package-R3xx.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。今使う版は `package-R392.sh`。 |
 | `Tools/rcm-mac/` | macOS から shofel2 でペイロードを送る手順。 |
 | `windows/` | Windows を用意するときの道具（ログインの修正、ドライバーの棚卸し）。ドライバー本体は [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) にある。 |
 | `docs/ja/uefi-revisions/` | UEFI の試験イメージごとの説明と、実機での結果。 |
@@ -65,23 +65,29 @@ Windows のイメージとライセンスは、各自で用意してください
 ## UEFI のペイロードのビルド
 
 1. edk2 の `edk2-stable202102` を取ってきて、`patches/edk2/*.patch` を当てる（`patch -p1`）。
-2. このリポジトリを `edk2/NintendoSwitchPkg` に置く。XUSB のファームウェアを、`Firmware/README.md` のとおりに置く。
+2. このリポジトリを `edk2/NintendoSwitchPkg` に置く。
 3. `NintendoSwitchPkg/NintendoSwitch.dsc` を、AARCH64・GCC5 でビルドする。
 4. `TEGRA210_EFI.fd` を ELF のペイロードに包んで、coreboot の ROM に `fallback/payload` として入れる。
    - coreboot の ROM は、imbushuo/Coreboot に `patches/coreboot` を当ててビルドしたもの。
-   - 正確なコマンドは `Tools/uefi/package-R390.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
-5. Switch を RCM にして、shofel2 で ROM を送る。
+   - 正確なコマンドは `Tools/uefi/package-R392.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
+5. XUSB（USB ホスト）のファームウェアを、SD の ESP の一番上に `tegra21x_xusb_firmware` という名前で置く（`Firmware/README.md` を参照）。
+   - UEFI は、起動のたびにここから読む。無いと USB が動かない。
+   - 自分だけで使うビルドなら、`-D EMBED_XUSB_FIRMWARE=TRUE` で ROM に埋め込むこともできる。
+6. Switch を RCM にして、shofel2 で ROM を送る。
    - Linux から: `shofel2.py cbfs.bin coreboot.rom`
    - macOS から: `Tools/rcm-mac/` を参照。
 
 ## どの版の UEFI を使うか
 
-- **今使う版は R390。** 変更点と実機の結果は `docs/ja/uefi-revisions/R390-README-ja.md`。
+- **今使う版は R392。** 変更点と実機の結果は `docs/ja/uefi-revisions/R392-README-ja.md`。
+  - R390 に、次の2つを足したもの。XUSB のファームウェアを ESP から読む。Bluetooth の UART のクロックを、起動のたびに元に戻す。
 - R391 は使わない（UART のクロックの設定を間違えていて、Bluetooth の UEFI の確認が通らない）。
 
 ## ROM の配布について
 
-ビルドした ROM（coreboot + UEFI）は、配っていません。ROM には NVIDIA の XUSB のファームウェアが入ります。linux-firmware の `LICENCE.nvidia` では、再配布はオープンソースの OS で使う場合に限られています。Windows 用の ROM に入れて配ることは、そこに入りません。上の手順で、自分で用意したファームウェアを使ってビルドしてください。
+ビルドした ROM（coreboot + UEFI）は、配っていません。上の手順で、各自でビルドしてください。
+- coreboot の部分には、本体由来のメモリの調整データ（`nx_abca2_0_3.bin`、`tegra_mtc_table_*.bin`）が入る。これは再配布できない。
+- NVIDIA の XUSB のファームウェア: linux-firmware の `LICENCE.nvidia` では、再配布はオープンソースの OS で使う場合に限られる。R392 からは ROM に入れず（自分で埋め込んだときを除く）、各自のファームウェアを ESP に置く。
 
 ## Windows のドライバーの入れ方
 

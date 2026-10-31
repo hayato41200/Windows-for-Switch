@@ -3881,12 +3881,15 @@ STATIC VOID R390UartSend (CONST UINT8 *Buf, UINTN Len) {
 }
 
 // Reads one HCI event (04 code len params) within TimeoutMs; returns its length.
+// Each received byte counts as 90 us (one byte time at 115200), so a line
+// that never stops sending still times out.
 STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
   volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
   UINTN Got = 0, Need = 3, T;
   for (T = 0; T < TimeoutMs * 100 && Got < Need; ) {
     if ((U[UART_LSR] & UART_LSR_DR) == 0) { gBS->Stall (10); ++T; continue; }
     UINT8 B = (UINT8)U[UART_THR];
+    T += 9;
     if (Got == 0 && B != 0x04U) continue;              // skip anything before an event
     if (Got < Max) Buf[Got] = B;
     if (++Got == 3) Need = 3U + B;
@@ -3938,7 +3941,7 @@ STATIC VOID R390BluetoothPowerOn (VOID) {
   // Power the chip; the ROM needs some time before it listens.
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 4, TRUE);
   gBS->Stall (150000);
-  while ((U[UART_LSR] & UART_LSR_DR) != 0) (VOID)U[UART_THR];
+  for (I = 0; I < 4096 && (U[UART_LSR] & UART_LSR_DR) != 0; ++I) (VOID)U[UART_THR];
 
   R390UartSend (Reset, sizeof (Reset));
   Len = R390UartEvent (Ev, sizeof (Ev), 500);

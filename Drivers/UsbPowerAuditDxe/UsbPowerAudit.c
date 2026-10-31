@@ -4012,6 +4012,26 @@ STATIC VOID R393AudioProbe (VOID) {
 // and size). In R396 the samples written to ADMAIF1 never left it
 // (TX status the same before and after the tone).
 #define ADMAIF_TX1_FIFO_CTRL_DEFAULT 0x02000300U
+// R398: R397's CPU writes to ADMAIF TX1 FIFO_WRITE never moved (status the
+// same before, during and after). Feed ADMAIF1 the way Linux does: ADMA
+// channel 0, memory to AHUB, request = ADMAIF TX1 (DT dmas "tx1" = 1),
+// continuous mode over one 48-frame buffer (one 1 kHz period), and the
+// ADMAIF in 16-bit pack mode (two samples per 32-bit word, as in memory).
+#define APE_ADMA_BASE        0x702E2000UL
+#define ADMA_GLOBAL_CMD      0xC00U
+#define ADMA_CH_CMD          0x00U
+#define ADMA_CH_STATUS       0x0CU
+#define ADMA_CH_CTRL         0x24U
+#define ADMA_CH_CONFIG       0x28U
+#define ADMA_CH_FIFO_CTRL    0x2CU
+#define ADMA_CH_LOWER_SRC    0x34U
+#define ADMA_CH_LOWER_TRG    0x3CU
+#define ADMA_CH_TC           0x44U
+#define ADMA_CH_XFER_STATUS  0x54U
+#define ADMA_CTRL_TX1        ((1U << 28) | (4U << 12) | (2U << 8) | (1U << 1))   // req ADMAIF1, MEM2AHUB, continuous, flow control
+#define ADMA_CONFIG_1BUF     ((5U << 20) | 1U)                                    // burst 16 words, WRR weight 1
+#define ADMA_FIFO_TX3        (3U << 8)
+#define ADMAIF_PACK16        (1U << 30)
 #define I2S_RX_INT_MASK      0x14U
 #define I2S_TX_INT_MASK      0x54U
 #define I2S_TX_CIF_CTRL      0x60U
@@ -4133,8 +4153,7 @@ STATIC VOID R395AudioTone (VOID) {
         0,  -535, -1060, -1567, -2048, -2493, -2896, -3250, -3547, -3784, -3956, -4061,
     -4096, -4061, -3956, -3784, -3547, -3250, -2896, -2493, -2048, -1567, -1060,  -535,
   };
-  UINT32 ClkmKhz, Div, Frame;
-  UINT64 Freq, Next, Step;
+  UINT32 ClkmKhz, Div;
   BOOLEAN CodecOk;
 
   // R396: d_audio on (from clk_m) and APE out of reset before any APE register access.
@@ -4198,7 +4217,7 @@ STATIC VOID R395AudioTone (VOID) {
          Admaif[ADMAIF_TX1_FIFO_CTRL / 4], Admaif[ADMAIF_TX1_INT_MASK / 4]);
   Admaif[ADMAIF_TX1_INT_MASK / 4] = 1U;
   Admaif[ADMAIF_TX1_FIFO_CTRL / 4] = ADMAIF_TX1_FIFO_CTRL_DEFAULT;
-  Admaif[ADMAIF_TX1_ACIF_CTRL / 4] = ACIF_16BIT_STEREO;
+  Admaif[ADMAIF_TX1_ACIF_CTRL / 4] = ADMAIF_PACK16 | ACIF_16BIT_STEREO;
   Admaif[ADMAIF_TX1_ENABLE / 4] = 1;
   I2s[I2S_RX_ENABLE / 4] = 1;
   I2s[I2S_ENABLE / 4] = 1;                     // BCLK and LRCK run from here
@@ -4210,24 +4229,39 @@ STATIC VOID R395AudioTone (VOID) {
          ClkmKhz, Div, Car[CAR_CLK_SOURCE_I2S1 / 4], CodecOk ? L"ok" : L"I2C FAIL",
          Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
 
-  // One second of tone, paced by the architected counter (one frame every 1/48000 s),
-  // with a few frames ahead so the FIFO never runs dry.
-  Freq = R364CounterFreq ();
-  Step = Freq / 48000U;
-  Next = R364Counter ();
-  for (Frame = 0; Frame < 48000U + 16U; ++Frame) {
-    INT32 Sample = (Frame < 48000U) ? Sine[Frame % 48U] : 0;
-    if (Frame >= 16U) {
-      while (R364Counter () < Next) { }
-      Next += Step;
-    }
-    Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // left
-    Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // right
-    if (Frame == 24000U) {
-      Print (L"R397 audio mid-tone: ADMAIF st=%08x I2S st=%08x fifo=%08x XBAR=%08x\r\n",
-             Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4],
-             Xbar[XBAR_I2S1_RX_MUX / 4]);
-      Next = R364Counter () + Step;          // the Print took time; keep the pace from here
+  // R398: one second of tone through ADMA channel 0.
+  {
+    volatile UINT32 *Adma = (volatile UINT32 *)APE_ADMA_BASE;
+    EFI_PHYSICAL_ADDRESS Buffer = 0xFFFFFFFFULL;
+    UINT32 *Words;
+    UINTN Index;
+    if (EFI_ERROR (gBS->AllocatePages (AllocateMaxAddress, EfiBootServicesData, 1, &Buffer))) {
+      Print (L"R398 audio: no buffer below 4 GiB\r\n");
+    } else {
+      Words = (UINT32 *)(UINTN)Buffer;
+      for (Index = 0; Index < 48; ++Index) {
+        Words[Index] = ((UINT32)(UINT16)Sine[Index] << 16) | (UINT16)Sine[Index];   // R:L, S16LE
+      }
+      WriteBackDataCacheRange (Words, 48 * sizeof (UINT32));
+      Print (L"R398 audio step: ADMA global %08x ch0 status %08x... ", Adma[ADMA_GLOBAL_CMD / 4], Adma[ADMA_CH_STATUS / 4]);
+      Adma[ADMA_GLOBAL_CMD / 4] = 1;
+      Adma[ADMA_CH_CMD / 4] = 0;
+      Adma[ADMA_CH_TC / 4] = 48 * sizeof (UINT32);
+      Adma[ADMA_CH_CTRL / 4] = ADMA_CTRL_TX1;
+      Adma[ADMA_CH_LOWER_SRC / 4] = (UINT32)Buffer;
+      Adma[ADMA_CH_LOWER_TRG / 4] = 0;
+      Adma[ADMA_CH_FIFO_CTRL / 4] = ADMA_FIFO_TX3;
+      Adma[ADMA_CH_CONFIG / 4] = ADMA_CONFIG_1BUF;
+      Adma[ADMA_CH_CMD / 4] = 1;
+      Print (L"started\r\n");
+      gBS->Stall (500000);
+      Print (L"R398 audio mid-tone: ADMA st=%08x xfer=%08x ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
+             Adma[ADMA_CH_STATUS / 4], Adma[ADMA_CH_XFER_STATUS / 4], Admaif[ADMAIF_TX1_STATUS / 4],
+             I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
+      gBS->Stall (500000);
+      Adma[ADMA_CH_CMD / 4] = 0;
+      gBS->Stall (1000);
+      gBS->FreePages (Buffer, 1);
     }
   }
   gBS->Stall (5000);
@@ -4584,7 +4618,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R397 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R398 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

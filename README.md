@@ -25,19 +25,21 @@ EDK2 platform package, whose history is kept here). It adds:
 | Feature | How |
 |---|---|
 | Boot to the desktop from microSD | RCM → coreboot → UEFI (this package) → Windows Boot Manager on the SD |
-| USB host: HS and FS, hubs, keyboard, mouse, storage, RTL8153 Ethernet | UEFI brings XUSB up and leaves it running; Windows inbox `USBXHCI` |
+| USB host: HS and FS, hubs, keyboard, mouse, storage, RTL8153 Ethernet | UEFI brings XUSB up and leaves it running; Windows inbox `USBXHCI`. Since R389 the DSDT shows XHC0 only when XUSB came up |
 | USB-C hot-plug under Windows (device: VBUS on/off; charger hub: charge + host) | UEFI R378 starts XUSB even with nothing attached; `switchbattery.sys` v4 watches the BM92T |
 | Charging through a USB-C PD hub | UEFI: BM92T sink + BQ24193 charge mode + DR_SWAP to host |
 | CPU at 1020 MHz at boot; selectable 614–1766 MHz in Windows | UEFI (PLLX + MAX77621) + `switchcpu.sys` + tray app |
 | Fan (temperature controlled) | UEFI + `switchfan.sys` |
 | Backlight brightness; off when Windows turns the display off | UEFI R376 (PWM0) + `switchfan.sys` v2 + tray app |
-| Volume buttons | DSDT `ACPI0011` + GPIO driver + inbox `hidinterrupt` |
+| Volume buttons | DSDT `ACPI0011` + GPIO driver + inbox `hidinterrupt`; 20 ms debounce since R389 |
 | Power button (display off / lock) | `switchpwrbtn.sys` (MAX77620 EN0) |
 | Battery level, AC, charging | `switchbattery.sys` (MAX17050 + BQ24193) |
 | Touch screen: multi-touch, press-and-hold | UEFI powers the FTM4 + `switchtouch.sys` |
+| Screen auto-rotation | UEFI R379 (SPI4/I2C2 clocks, DSDT SENS) + `switchsensor.sys` (LSM6DS3H) + tray app |
+| Bluetooth (keyboard, audio) | UEFI R390 (chip power, DSDT BTH0) + `switchbt.sys` + inbox BthMini. Bring your own `BCM4356A3.hcd` patch. Range is very short for now |
 | Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
-Not done: GPU acceleration (basic display only), audio, Wi-Fi/BT, Joy-Con rail, sleep.
+Not done: GPU acceleration (basic display only), audio, Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
 
 ## Tested OS
 
@@ -53,7 +55,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R378.sh` | The script the tested image was built with (paths are those of the original setup). |
+| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R390.sh`. |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Setup helpers: the login fix and the driver inventory script. The drivers themselves are in [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers). |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -66,16 +68,24 @@ Bring your own Windows image and license. This repository does not contain Windo
 3. Build `NintendoSwitchPkg/NintendoSwitch.dsc` for AARCH64 with GCC5.
 4. Wrap `TEGRA210_EFI.fd` as an ELF payload and add it to a coreboot ROM built from
    imbushuo/Coreboot (with `patches/coreboot`), as `fallback/payload`.
-   - `Tools/uefi/package-R378.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
+   - `Tools/uefi/package-R390.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
 5. Send the ROM in RCM with shofel2. From Linux:
    `shofel2.py cbfs.bin coreboot.rom`. For macOS, see `Tools/rcm-mac/`.
+
+## Which UEFI revision
+
+Use R390 (notes: `docs/ja/uefi-revisions/R390-README-ja.md`). Do not use R391: its UART clock setting is wrong.
+
+## No prebuilt ROM
+
+Built ROMs (coreboot + UEFI) are not published. They embed NVIDIA's XUSB firmware, and linux-firmware's `LICENCE.nvidia` allows redistribution only for use on open source operating systems; a ROM for Windows is outside that. Build it with firmware you obtained yourself, as above.
 
 ## Installing the Windows drivers
 
 The drivers, their install kits and the control center (SwitchCenter) are in
 [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers).
 Download the release ZIPs there and follow its README (test signing, then GPIO, I2C,
-battery, fan, touch, power button, CPU clock and RTC). The control center can then
+battery, fan, touch, power button, CPU clock, RTC, sensors and Bluetooth). The control center can then
 update the drivers over the air.
 
 ## Credits

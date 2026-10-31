@@ -22,22 +22,24 @@ English: [README.md](README.md)
 | 機能 | 実現方法 |
 |---|---|
 | microSD からデスクトップまで起動 | RCM → coreboot → UEFI（このパッケージ）→ SD 上の Windows Boot Manager |
-| USB ホスト（HS/FS）: ハブ、キーボード、マウス、ストレージ、RTL8153 の有線 LAN | UEFI が XUSB を起動したまま引き渡し、Windows 標準の `USBXHCI` が動かす |
+| USB ホスト（HS/FS）: ハブ、キーボード、マウス、ストレージ、RTL8153 の有線 LAN | UEFI が XUSB を起動したまま引き渡し、Windows 標準の `USBXHCI` が動かす。R389 から、XUSB を起動できたときだけ DSDT の XHC0 を Windows に見せる |
 | Windows の起動後の USB-C の抜き差し（機器なら 5V を出す・止める。充電器付きのハブなら充電 + ホスト） | UEFI R378 が、何もつながっていなくても XUSB を起動する。`switchbattery.sys` v4 が BM92T を見張る |
 | USB-C PD のハブを通した充電 | UEFI: BM92T をシンクにし、BQ24193 を充電モードにして、DR_SWAP でホストになる |
 | 起動時の CPU 1020 MHz、Windows 上で 614〜1766 MHz を選べる | UEFI（PLLX + MAX77621）+ `switchcpu.sys` + 常駐アプリ |
 | ファン（温度による自動制御） | UEFI + `switchfan.sys` |
-| 画面の明るさ。Windows が画面を消すとバックライトも消える | UEFI R376（PWM0）+ `switchfan.sys` v2 + 常駐アプリ |
-| 音量ボタン | DSDT の `ACPI0011` + GPIO ドライバー + Windows 標準の `hidinterrupt` |
+| 画面の明るさ。Windows が画面を消すとバックライトも消える | UEFI R376（PWM0、R389 で PWM のクロックの選び方も直した）+ `switchfan.sys` v2 + 常駐アプリ |
+| 音量ボタン | DSDT の `ACPI0011` + GPIO ドライバー + Windows 標準の `hidinterrupt`。R389 から debounce 20 ms で、1回押すと1段だけ変わる |
 | 電源ボタン（画面オフ、ロック） | `switchpwrbtn.sys`（MAX77620 の EN0） |
 | バッテリー残量、AC、充電中の表示 | `switchbattery.sys`（MAX17050 + BQ24193） |
 | タッチパネル（マルチタッチ、長押し） | UEFI が FTM4 の電源を入れる + `switchtouch.sys` |
+| 画面の自動回転 | UEFI R379（SPI4 と I2C2 のクロック、DSDT の SENS）+ `switchsensor.sys`（LSM6DS3H）+ 常駐アプリ。明るさセンサーは、この本体では見つからない |
+| Bluetooth（キーボード、オーディオ） | UEFI R390（チップの電源、DSDT の BTH0）+ `switchbt.sys` + Windows 標準の BthMini。ファームウェアのパッチ `BCM4356A3.hcd` は各自で用意する。電波は機器にかなり近づけないと届かない |
 | 再起動しても時計が合っている | `switchrtc.sys` が MAX77620 の RTC を読み、最後の時刻同期で覚えたずれを足す。RTC には書き込まないので、Horizon の時計には影響しない |
 
 **まだできないこと:**
 - GPU による高速化（今は標準の画面ドライバーで描いている）
 - 音声
-- Wi-Fi と Bluetooth
+- Wi-Fi（Bluetooth の電波が近くまでしか届かないのも、Wi-Fi 側が動いていないためと見ている）
 - Joy-Con のレール
 - スリープ
 
@@ -55,7 +57,7 @@ Windows のイメージとライセンスは、各自で用意してください
 | `Firmware/` | XUSB のファームウェアを置く場所。リポジトリには入っていない（README を参照）。 |
 | `patches/edk2/` | edk2 の `XhciDxe` の修正。非コヒーレントな DMA バッファを write-combine で確保する。 |
 | `patches/coreboot/` | [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) を、今のツールでビルドするための修正。 |
-| `Tools/uefi/package-R378.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。 |
+| `Tools/uefi/package-R3xx.sh` | 試験済みのイメージを作ったスクリプト（パスは元の環境のもの）。今使う版は `package-R390.sh`。 |
 | `Tools/rcm-mac/` | macOS から shofel2 でペイロードを送る手順。 |
 | `windows/` | Windows を用意するときの道具（ログインの修正、ドライバーの棚卸し）。ドライバー本体は [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) にある。 |
 | `docs/ja/uefi-revisions/` | UEFI の試験イメージごとの説明と、実機での結果。 |
@@ -67,15 +69,24 @@ Windows のイメージとライセンスは、各自で用意してください
 3. `NintendoSwitchPkg/NintendoSwitch.dsc` を、AARCH64・GCC5 でビルドする。
 4. `TEGRA210_EFI.fd` を ELF のペイロードに包んで、coreboot の ROM に `fallback/payload` として入れる。
    - coreboot の ROM は、imbushuo/Coreboot に `patches/coreboot` を当ててビルドしたもの。
-   - 正確なコマンドは `Tools/uefi/package-R378.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
+   - 正確なコマンドは `Tools/uefi/package-R390.sh` にある（`objcopy` + `FvWrapper.ld` + `cbfstool`）。
 5. Switch を RCM にして、shofel2 で ROM を送る。
    - Linux から: `shofel2.py cbfs.bin coreboot.rom`
    - macOS から: `Tools/rcm-mac/` を参照。
 
+## どの版の UEFI を使うか
+
+- **今使う版は R390。** 変更点と実機の結果は `docs/ja/uefi-revisions/R390-README-ja.md`。
+- R391 は使わない（UART のクロックの設定を間違えていて、Bluetooth の UEFI の確認が通らない）。
+
+## ROM の配布について
+
+ビルドした ROM（coreboot + UEFI）は、配っていません。ROM には NVIDIA の XUSB のファームウェアが入ります。linux-firmware の `LICENCE.nvidia` では、再配布はオープンソースの OS で使う場合に限られています。Windows 用の ROM に入れて配ることは、そこに入りません。上の手順で、自分で用意したファームウェアを使ってビルドしてください。
+
 ## Windows のドライバーの入れ方
 
 ドライバー、導入キット、コントロールセンター（SwitchCenter）は、[Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) に移しました。
-そちらのリリースの ZIP を取ってきて、README の手順で入れてください。順番は、テスト署名の準備、GPIO、I2C、バッテリー、ファン、タッチ、電源ボタン、CPU クロック、時計（RTC）です。入れたあとは、コントロールセンターからドライバーを更新（OTA）できます。
+そちらのリリースの ZIP を取ってきて、README の手順で入れてください。順番は、テスト署名の準備、GPIO、I2C、バッテリー、ファン、タッチ、電源ボタン、CPU クロック、時計（RTC）、センサー、Bluetooth です。入れたあとは、コントロールセンターからドライバーを更新（OTA）できます。
 
 ## クレジット
 

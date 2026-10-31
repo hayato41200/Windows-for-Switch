@@ -3957,13 +3957,25 @@ STATIC VOID R393AudioProbe (VOID) {
   R366GpioSet (GPIO_PZ_OFFSET, GPIO_OUT, 4, TRUE);
   R366GpioSet (GPIO_PZ_OFFSET, GPIO_OE, 4, TRUE);
   R366GpioSet (GPIO_PZ_OFFSET, GPIO_CNF, 4, TRUE);
-  gBS->Stall (20000);
+  // R394: Linux rt5640 waits 400 ms after LDO1_EN before the first access (R393 waited 20 ms: no answer).
+  gBS->Stall (400000);
+  Print (L"R394 audio LDO1_EN PZ4: cnf=%u oe=%u out=%u in=%u pinmux=%08x\r\n",
+         R366GpioBit (GPIO_PZ_OFFSET, GPIO_CNF, 4), R366GpioBit (GPIO_PZ_OFFSET, GPIO_OE, 4),
+         R366GpioBit (GPIO_PZ_OFFSET, GPIO_OUT, 4), R366GpioBit (GPIO_PZ_OFFSET, GPIO_IN, 4),
+         Pin[PINMUX_GPIO_PZ4 / 4]);
 
-  Ok1 = R393CodecRead16 (RT5640_VENDOR_ID1, &Id1);
-  Ok2 = R393CodecRead16 (RT5640_VENDOR_ID2, &Id2);
-  Ok3 = R393CodecRead16 (RT5640_RESET, &Reset);
-  Print (L"R393 audio codec: I2C1 0x1C %s VENDOR_ID1=%04x (10ec = Realtek) ID2=%04x reg00=%04x\r\n",
-         (Ok1 && Ok2) ? L"answers" : L"NO ANSWER", Id1, Id2, Reset);
+  {
+    UINTN Try;
+    Ok1 = FALSE;
+    for (Try = 0; Try < 6 && !Ok1; ++Try) {
+      if (Try != 0) gBS->Stall (100000);
+      Ok1 = R393CodecRead16 (RT5640_VENDOR_ID1, &Id1);
+    }
+    Ok2 = R393CodecRead16 (RT5640_VENDOR_ID2, &Id2);
+    Ok3 = R393CodecRead16 (RT5640_RESET, &Reset);
+    Print (L"R394 audio codec: I2C1 0x1C %s after %u tries VENDOR_ID1=%04x (10ec = Realtek) ID2=%04x reg00=%04x\r\n",
+           Ok1 ? L"answers" : L"NO ANSWER", (UINT32)Try, Id1, Id2, Reset);
+  }
   (VOID)Ok3;
   Print (L"R393 audio state (read only): APE partition %s  CLK_L=%08x CLK_V=%08x CLK_Y=%08x PLLA=%08x\r\n",
          ((Pmc[PMC_PWRGATE_STATUS / 4] >> PMC_PG_APE_BIT) & 1U) ? L"on" : L"off",
@@ -4317,7 +4329,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R393 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R394 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

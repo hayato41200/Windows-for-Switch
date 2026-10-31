@@ -3869,7 +3869,17 @@ STATIC VOID R379SensorsPowerOn (VOID) {
 #define UART_DLM             (0x04U / 4)
 #define UART_LSR_DR          (1U << 0)
 #define UART_LSR_THRE        (1U << 5)
-#define UART_DIV_115200      221U        // 408 MHz / 16 / 221 = 115384 baud
+#define UART_DIV_115200      26U         // R391: 48 MHz / 16 / 26 = 115384 baud
+// R391: UART-D runs from PLLP / 8.5 = 48 MHz (divider enabled, N = 15 in
+// 15.1 format), as Linux sets it: 48 MHz / 16 = 3 Mbaud with divisor 1, the
+// speed switchbt moves the chip to. 115200 keeps the same 0.16 % error.
+#define UARTD_CLK_48MHZ      ((1U << 24) | 15U)
+// R391: the BCM4356 low-power clock is MAX77620 GPIO4 in its 32k-out1 mode
+// (L4T DT pin_gpio4 function "32k-out1"; coreboot writes AME_GPIO 0x1C).
+// Check it and turn it on if a loader left GPIO4 a plain GPIO.
+#define MAX77620_CNFG1_32K   0x03
+#define MAX77620_AME_GPIO    0x40
+#define MAX77620_AME_GPIO4   (1U << 4)
 
 STATIC VOID R390UartSend (CONST UINT8 *Buf, UINTN Len) {
   volatile UINT32 *U = (volatile UINT32 *)UARTD_BASE;
@@ -3929,7 +3939,9 @@ STATIC VOID R390BluetoothPowerOn (VOID) {
 
   // UART-D from PLLP (408 MHz, no clock divider), 115200 8N1, FIFOs on, RTS on.
   Pulsed = R379ClockOn (CAR_CLK_OUT_ENB_U, CAR_RST_DEVICES_U, CAR_CLK_ENB_U_SET, CAR_RST_DEV_U_SET,
-                        CAR_RST_DEV_U_CLR, CLK_U_UARTD_BIT, CAR_CLK_SOURCE_UARTD, 0);
+                        CAR_RST_DEV_U_CLR, CLK_U_UARTD_BIT, CAR_CLK_SOURCE_UARTD, UARTD_CLK_48MHZ);
+  ((volatile UINT32 *)CAR_BASE)[CAR_CLK_SOURCE_UARTD / 4] = UARTD_CLK_48MHZ;   // also when it was on already
+  gBS->Stall (10);
   U[UART_IER] = 0;
   U[UART_LCR] = 0x80U;
   U[UART_DLL] = UART_DIV_115200 & 0xFFU;
@@ -3937,6 +3949,21 @@ STATIC VOID R390BluetoothPowerOn (VOID) {
   U[UART_LCR] = 0x03U;
   U[UART_FCR] = 0x07U;
   U[UART_MCR] = 0x02U;
+
+  // R391: the chip's 32 kHz low-power clock from the PMIC.
+  {
+    UINT8 Ame = 0, K32 = 0, AmeRead = 0;
+    BOOLEAN Ok = i2c_recv_buf_small (&Ame, 1, I2C_5, MAX77620_ADDR, MAX77620_AME_GPIO) == 1 &&
+                 i2c_recv_buf_small (&K32, 1, I2C_5, MAX77620_ADDR, MAX77620_CNFG1_32K) == 1;
+    if (Ok && (Ame & MAX77620_AME_GPIO4) == 0) {
+      i2c_send_byte (I2C_5, MAX77620_ADDR, MAX77620_AME_GPIO, (UINT8)(Ame | MAX77620_AME_GPIO4));
+    }
+    if (Ok) {
+      i2c_recv_buf_small (&AmeRead, 1, I2C_5, MAX77620_ADDR, MAX77620_AME_GPIO);
+    }
+    Print (L"R391 Bluetooth 32k: PMIC AME_GPIO %02x -> %02x (bit 4 = GPIO4 32k-out1) CNFG1_32K %02x %s\r\n",
+           Ame, AmeRead, K32, Ok ? L"" : L"READ FAIL");
+  }
 
   // Power the chip; the ROM needs some time before it listens.
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 4, TRUE);
@@ -4223,7 +4250,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R390 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R391 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

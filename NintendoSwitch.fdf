@@ -115,10 +115,14 @@ READ_LOCK_STATUS   = TRUE
   INF NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf
   INF NintendoSwitchPkg/Drivers/PinMuxDxe/PinMuxDxe.inf
   INF NintendoSwitchPkg/Drivers/UsbPowerAuditDxe/UsbPowerAudit.inf
-  # R359: XUSB firmware embedded for UsbPowerAuditDxe (GetSectionFromAnyFv)
+  # R359: XUSB firmware embedded for UsbPowerAuditDxe (GetSectionFromAnyFv).
+  # R392: only with -D EMBED_XUSB_FIRMWARE=TRUE (a private build). Without it,
+  # UsbPowerAuditDxe reads \tegra21x_xusb_firmware from a FAT volume (the ESP).
+!if $(EMBED_XUSB_FIRMWARE) == TRUE
   FILE FREEFORM = 5A0F6A3E-2D4C-4C1B-9E51-7B3F168A0C42 {
     SECTION RAW = NintendoSwitchPkg/Firmware/tegra21x_xusb_firmware
   }
+!endif
   # INF NintendoSwitchPkg/Drivers/EhciPciEmulationDxe/PciEmulation.inf
   INF MdeModulePkg/Bus/Pci/NonDiscoverablePciDeviceDxe/NonDiscoverablePciDeviceDxe.inf
   INF MdeModulePkg/Bus/Pci/XhciDxe/XhciDxe.inf

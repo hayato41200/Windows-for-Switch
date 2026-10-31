@@ -550,6 +550,12 @@ STATIC VOID CaptureR292CarFileSnapshot (BOOLEAN AfterFileRead) {
 
 // R362: tegra21x_xusb_firmware embedded in the ROM as a FREEFORM file with a
 // single RAW section (see NintendoSwitch.fdf), so no SD card is needed.
+// R392: the published ROM does not embed it (NVIDIA's licence allows
+// redistribution only for open source operating systems). The user puts
+// their own copy at the root of a FAT volume (the SD's ESP) and the FAT path
+// below loads it. Any size the header agrees with is taken: the tested L4T
+// image is 124,416 bytes, linux-firmware's nvidia/tegra210/xusb.bin 126,464.
+#define XUSB_FW_SIZE_OK(Size)  ((Size) >= 65536U && (Size) <= 262144U)
 STATIC CONST EFI_GUID mR362XusbFirmwareFileGuid = {
   0x5a0f6a3e, 0x2d4c, 0x4c1b, { 0x9e, 0x51, 0x7b, 0x3f, 0x16, 0x8a, 0x0c, 0x42 }
 };
@@ -574,7 +580,7 @@ STATIC BOOLEAN R362LoadEmbeddedFirmware (VOID) {
   ImageLength = (Size >= 256) ? ReadLe32 ((UINT8 *)Data + 100) : 0;
   Print (L"R362 embedded XUSB firmware: size=%u fwimg_len=%u boot_codetag=%08x boot_codesize=%u\r\n",
          (UINT32)Size, ImageLength, CodeTag, CodeSize);
-  if (Size != 124416 || ImageLength != Size || CodeTag >= ImageLength || CodeSize == 0 ||
+  if (!XUSB_FW_SIZE_OK (Size) || ImageLength != Size || CodeTag >= ImageLength || CodeSize == 0 ||
       CodeTag + CodeSize > ImageLength) {
     Print (L"R362 embedded XUSB firmware header validation: FAIL; trying FAT volumes\r\n");
     gBS->FreePool (Data);
@@ -667,15 +673,15 @@ STATIC BOOLEAN AuditXusbFirmwareFile (VOID) {
     Version = ReadLe32 (&Header[72]);
     ImageLength = ReadLe32 (&Header[100]);
     Print (L"Found \\tegra21x_xusb_firmware on FAT volume %d\r\n", (UINT32)Index);
-    Print (L"File size=%ld expected=124416 %s\r\n", FileSize,
-           FileSize == 124416ULL ? L"MATCH" : L"DIFF");
+    Print (L"File size=%ld (tested: 124416 L4T, 126464 linux-firmware) %s\r\n", FileSize,
+           XUSB_FW_SIZE_OK (FileSize) ? L"IN RANGE" : L"OUT OF RANGE");
     Print (L"Header: fwimg_len=%u boot_codetag=%08x boot_codesize=%u\r\n",
            ImageLength, CodeTag, CodeSize);
     Print (L"Header: created=%u version_id=%08x magic=%c%c%c%c%c%c%c%c\r\n",
            Created, Version,
            (CHAR16)Header[104], (CHAR16)Header[105], (CHAR16)Header[106], (CHAR16)Header[107],
            (CHAR16)Header[108], (CHAR16)Header[109], (CHAR16)Header[110], (CHAR16)Header[111]);
-    if (FileSize == 124416ULL && ImageLength == FileSize &&
+    if (XUSB_FW_SIZE_OK (FileSize) && ImageLength == FileSize &&
         CodeTag < ImageLength && CodeSize != 0 && CodeTag + CodeSize <= ImageLength) {
       Print (L"R77 firmware header validation: PASS\r\n");
     } else {
@@ -1428,7 +1434,7 @@ STATIC BOOLEAN RunR246FirmwareTransfer (volatile UINT32 *Fpci, UINT8 *Firmware,
   UINT32 SavedRange = Fpci[0x41C / 4];
   BOOLEAN Ok = FALSE;
 
-  if (FirmwareSize != 124416U || FirmwareAddress + FirmwareSize > 0x100000000ULL ||
+  if (!XUSB_FW_SIZE_OK (FirmwareSize) || FirmwareAddress + FirmwareSize > 0x100000000ULL ||
       ReadLe32 (&Firmware[100]) != FirmwareSize || CodeTag == 0 || CodeSize == 0 ||
       (UINT64)CodeTag + CodeSize > FirmwareSize || (LoadBaseLo & 0xFFU) != 0) {
     Print (L"R246 STOP: transfer inputs failed validation; no firmware write.\r\n");
@@ -3078,7 +3084,7 @@ STATIC VOID RunR244FirmwareLoadPlanAudit (UINT32 Stage) {
   LoadAddress = mFirmwareAddress + 256U;
   PlanOk = (mFirmwareAddress != 0 &&
             mFirmwareAddress + mFirmwareSize <= 0x100000000ULL &&
-            mFirmwareSize == 124416U && ImageLength == mFirmwareSize &&
+            XUSB_FW_SIZE_OK (mFirmwareSize) && ImageLength == mFirmwareSize &&
             CodeTag != 0 && CodeSize != 0 &&
             (UINT64)CodeTag + (UINT64)CodeSize <= ImageLength &&
             (LoadAddress & 0xFFU) == 0 && (CodeTag & 0xFFU) == 0 &&
@@ -3869,11 +3875,13 @@ STATIC VOID R379SensorsPowerOn (VOID) {
 #define UART_DLM             (0x04U / 4)
 #define UART_LSR_DR          (1U << 0)
 #define UART_LSR_THRE        (1U << 5)
-#define UART_DIV_115200      26U         // R391: 48 MHz / 16 / 26 = 115384 baud
-// R391: UART-D runs from PLLP / 8.5 = 48 MHz (divider enabled, N = 15 in
-// 15.1 format), as Linux sets it: 48 MHz / 16 = 3 Mbaud with divisor 1, the
-// speed switchbt moves the chip to. 115200 keeps the same 0.16 % error.
-#define UARTD_CLK_48MHZ      ((1U << 24) | 15U)
+#define UART_DIV_115200      221U        // 408 MHz / 16 / 221 = 115384 baud
+// R392: UART-D from PLLP 408 MHz with the UART's own divisor, written every
+// boot. R391 set bit 24 (48 MHz), which makes the CAR clock the 16x baud
+// clock and bypasses DLL/DLM: the UART ran at 3 Mbaud and the 115200 check
+// got no answer. switchbt sets the 3 Mbaud clock itself and leaves the CAR
+// register as it was after a session, so a restart must reset it here.
+#define UARTD_CLK_PLLP       0U
 // R391: the BCM4356 low-power clock is MAX77620 GPIO4 in its 32k-out1 mode
 // (L4T DT pin_gpio4 function "32k-out1"; coreboot writes AME_GPIO 0x1C).
 // Check it and turn it on if a loader left GPIO4 a plain GPIO.
@@ -3939,8 +3947,8 @@ STATIC VOID R390BluetoothPowerOn (VOID) {
 
   // UART-D from PLLP (408 MHz, no clock divider), 115200 8N1, FIFOs on, RTS on.
   Pulsed = R379ClockOn (CAR_CLK_OUT_ENB_U, CAR_RST_DEVICES_U, CAR_CLK_ENB_U_SET, CAR_RST_DEV_U_SET,
-                        CAR_RST_DEV_U_CLR, CLK_U_UARTD_BIT, CAR_CLK_SOURCE_UARTD, UARTD_CLK_48MHZ);
-  ((volatile UINT32 *)CAR_BASE)[CAR_CLK_SOURCE_UARTD / 4] = UARTD_CLK_48MHZ;   // also when it was on already
+                        CAR_RST_DEV_U_CLR, CLK_U_UARTD_BIT, CAR_CLK_SOURCE_UARTD, UARTD_CLK_PLLP);
+  ((volatile UINT32 *)CAR_BASE)[CAR_CLK_SOURCE_UARTD / 4] = UARTD_CLK_PLLP;    // also when it was on already
   gBS->Stall (10);
   U[UART_IER] = 0;
   U[UART_LCR] = 0x80U;
@@ -4250,7 +4258,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R391 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R392 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

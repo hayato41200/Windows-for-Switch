@@ -20,6 +20,8 @@
 #
 ################################################################################
 [Defines]
+  # R392: embed NVIDIA's XUSB firmware in the image (private builds only; see Firmware/README.md)
+  DEFINE EMBED_XUSB_FIRMWARE     = FALSE
   PLATFORM_NAME                  = NintendoSwitch
   PLATFORM_GUID                  = f5e5d453-b715-4e01-8c50-fb298a273fd7
   PLATFORM_VERSION               = 0.1

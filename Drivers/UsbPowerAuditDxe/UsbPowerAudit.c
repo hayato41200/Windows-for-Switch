@@ -4018,6 +4018,19 @@ STATIC VOID R393AudioProbe (VOID) {
 #define ACIF_16BIT_STEREO    ((1U << 20) | (1U << 16) | (3U << 12) | (3U << 8))
 #define CAR_SPARE_REG0       0x55CU
 #define CLK_L_I2S1_BIT       (1U << 11)
+// R396: R395 hung at the first APE register: the AHUB/XBAR/I2S/ADMAIF need the
+// d_audio clock (Linux: one of the APE partition's clocks), which was off
+// (CLK_OUT_ENB_V bit 10 = 0). d_audio from clk_m (mux value 0xC000 at bit 16).
+#define CAR_RST_DEVICES_V    0x358U
+#define CAR_RST_DEV_V_SET    0x430U
+#define CAR_RST_DEV_V_CLR    0x434U
+#define CAR_CLK_ENB_V_SET    0x440U
+#define CAR_RST_DEVICES_Y    0x2A4U
+#define CAR_RST_DEV_Y_CLR    0x2ACU
+#define CAR_CLK_SOURCE_D_AUDIO 0x3D0U
+#define CLK_V_D_AUDIO_BIT    (1U << 10)
+#define CLK_Y_APE_BIT        (1U << 6)
+#define PMC_CLAMP_STATUS     0x2CU
 #define GPIO_PB_OFFSET       0x004U      // port B: bank 0, port 1
 #define PINMUX_DAP1_FS       0x124U
 #define PINMUX_DAP1_DIN      0x128U
@@ -4113,6 +4126,24 @@ STATIC VOID R395AudioTone (VOID) {
   UINT64 Freq, Next, Step;
   BOOLEAN CodecOk;
 
+  // R396: d_audio on (from clk_m) and APE out of reset before any APE register access.
+  {
+    volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+    BOOLEAN Started;
+    Print (L"R396 audio before: RST_V=%08x RST_Y=%08x CLK_V=%08x D_AUDIO src=%08x PMC clamp=%08x\r\n",
+           Car[CAR_RST_DEVICES_V / 4], Car[CAR_RST_DEVICES_Y / 4], Car[CAR_CLK_OUT_ENB_V / 4],
+           Car[CAR_CLK_SOURCE_D_AUDIO / 4], Pmc[PMC_CLAMP_STATUS / 4]);
+    Started = R379ClockOn (CAR_CLK_OUT_ENB_V, CAR_RST_DEVICES_V, CAR_CLK_ENB_V_SET, CAR_RST_DEV_V_SET,
+                           CAR_RST_DEV_V_CLR, CLK_V_D_AUDIO_BIT, CAR_CLK_SOURCE_D_AUDIO, 0xC0000000U);
+    if ((Car[CAR_RST_DEVICES_Y / 4] & CLK_Y_APE_BIT) != 0) {
+      Car[CAR_RST_DEV_Y_CLR / 4] = CLK_Y_APE_BIT;
+      gBS->Stall (10);
+    }
+    Print (L"R396 audio after: d_audio %s RST_V=%08x RST_Y=%08x CLK_V=%08x D_AUDIO src=%08x\r\n",
+           Started ? L"started" : L"already on", Car[CAR_RST_DEVICES_V / 4], Car[CAR_RST_DEVICES_Y / 4],
+           Car[CAR_CLK_OUT_ENB_V / 4], Car[CAR_CLK_SOURCE_D_AUDIO / 4]);
+  }
+
   // clk_m = 38.4 MHz / (SPARE_REG0[3:2] + 1); I2S1 clock = BCLK = 1.536 MHz (7.1 divider).
   ClkmKhz = 38400U / (((Car[CAR_SPARE_REG0 / 4] >> 2) & 3U) + 1U);
   Div = (2U * ClkmKhz) / 1536U - 2U;
@@ -4132,12 +4163,16 @@ STATIC VOID R395AudioTone (VOID) {
   R366GpioSet (GPIO_PB_OFFSET, GPIO_CNF, 3, FALSE);
 
   // I2S1: master, LRCK (I2S) mode, LRCK low = left, 16 bit, 16 BCLK per channel, data offset 1.
+  Print (L"R396 audio step: first I2S1 read (CTRL)... ");
+  Print (L"%08x\r\n", I2s[I2S_CTRL / 4]);
   I2s[I2S_ENABLE / 4] = 0;
   I2s[I2S_CTRL / 4] = (1U << 10) | 3U;
   I2s[I2S_TIMING / 4] = 15U;
   I2s[I2S_RX_CTRL / 4] = 1U << 8;
   I2s[I2S_RX_CIF_CTRL / 4] = (3U << 24) | ACIF_16BIT_STEREO;
   // XBAR: I2S1 takes ADMAIF1.
+  Print (L"R396 audio step: XBAR read %08x, ADMAIF global %08x\r\n", Xbar[XBAR_I2S1_RX_MUX / 4],
+         Admaif[ADMAIF_GLOBAL_ENABLE / 4]);
   Xbar[XBAR_I2S1_RX_MUX / 4] = 1U;
   Xbar[(XBAR_I2S1_RX_MUX + 0x200U) / 4] = 0;
   Xbar[(XBAR_I2S1_RX_MUX + 0x400U) / 4] = 0;
@@ -4523,7 +4558,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R395 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R396 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

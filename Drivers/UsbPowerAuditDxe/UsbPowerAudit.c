@@ -4006,6 +4006,17 @@ STATIC VOID R393AudioProbe (VOID) {
 #define ADMAIF_TX1_ACIF_CTRL 0x320U
 #define ADMAIF_TX1_FIFO_CTRL 0x328U
 #define ADMAIF_TX1_FIFO_WRITE 0x32CU
+#define ADMAIF_TX1_INT_MASK  0x314U
+// R397: Linux writes these register defaults at probe (regcache); the
+// hardware's own reset values differ, e.g. ADMAIF TX1 FIFO_CTRL (FIFO start
+// and size). In R396 the samples written to ADMAIF1 never left it
+// (TX status the same before and after the tone).
+#define ADMAIF_TX1_FIFO_CTRL_DEFAULT 0x02000300U
+#define I2S_RX_INT_MASK      0x14U
+#define I2S_TX_INT_MASK      0x54U
+#define I2S_TX_CIF_CTRL      0x60U
+#define I2S_CG               0x88U
+#define I2S_CYA              0xB0U
 #define XBAR_I2S1_RX_MUX     0x040U      // MUX_REG(0x10); parts at +0x200, +0x400
 #define I2S_RX_ENABLE        0x00U
 #define I2S_RX_STATUS        0x0CU
@@ -4166,6 +4177,11 @@ STATIC VOID R395AudioTone (VOID) {
   Print (L"R396 audio step: first I2S1 read (CTRL)... ");
   Print (L"%08x\r\n", I2s[I2S_CTRL / 4]);
   I2s[I2S_ENABLE / 4] = 0;
+  I2s[I2S_RX_INT_MASK / 4] = 3U;               // Linux tegra210_i2s_reg_defaults
+  I2s[I2S_TX_INT_MASK / 4] = 3U;
+  I2s[I2S_TX_CIF_CTRL / 4] = 0x00007700U;
+  I2s[I2S_CG / 4] = 1U;
+  I2s[I2S_CYA / 4] = 1U;
   I2s[I2S_CTRL / 4] = (1U << 10) | 3U;
   I2s[I2S_TIMING / 4] = 15U;
   I2s[I2S_RX_CTRL / 4] = 1U << 8;
@@ -4178,6 +4194,10 @@ STATIC VOID R395AudioTone (VOID) {
   Xbar[(XBAR_I2S1_RX_MUX + 0x400U) / 4] = 0;
   // ADMAIF1 TX: 16-bit stereo, written by the CPU.
   Admaif[ADMAIF_GLOBAL_ENABLE / 4] = 1;
+  Print (L"R397 audio: ADMAIF TX1 FIFO_CTRL was %08x, INT_MASK %08x; writing the Linux defaults\r\n",
+         Admaif[ADMAIF_TX1_FIFO_CTRL / 4], Admaif[ADMAIF_TX1_INT_MASK / 4]);
+  Admaif[ADMAIF_TX1_INT_MASK / 4] = 1U;
+  Admaif[ADMAIF_TX1_FIFO_CTRL / 4] = ADMAIF_TX1_FIFO_CTRL_DEFAULT;
   Admaif[ADMAIF_TX1_ACIF_CTRL / 4] = ACIF_16BIT_STEREO;
   Admaif[ADMAIF_TX1_ENABLE / 4] = 1;
   I2s[I2S_RX_ENABLE / 4] = 1;
@@ -4203,6 +4223,12 @@ STATIC VOID R395AudioTone (VOID) {
     }
     Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // left
     Admaif[ADMAIF_TX1_FIFO_WRITE / 4] = (UINT32)(UINT16)Sample;   // right
+    if (Frame == 24000U) {
+      Print (L"R397 audio mid-tone: ADMAIF st=%08x I2S st=%08x fifo=%08x XBAR=%08x\r\n",
+             Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4],
+             Xbar[XBAR_I2S1_RX_MUX / 4]);
+      Next = R364Counter () + Step;          // the Print took time; keep the pace from here
+    }
   }
   gBS->Stall (5000);
   Print (L"R395 audio tone: done; ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
@@ -4558,7 +4584,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R396 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R397 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4590,6 +4616,10 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R390BluetoothPowerOn ();
   R393AudioProbe ();
   if (mR395CodecAnswers) R395AudioTone ();
+  // R397: the codec went through I2cLib, which leaves I2C1 out of packet mode;
+  // the BM92T reads then failed (R396: "BM92T read FAIL", USB skipped).
+  ((volatile UINT32 *)BASE_ADDR)[CNFG] |= 0x400U;
+  Print (L"R397 I2C1 back to packet mode: %s\r\n", R288LoadI2cConfig () ? L"ok" : L"FAIL");
   R386PrintGpioIrq ();
 
   if (!R288Read16 (BM_FW_TYPE, &FwType, &S) ||

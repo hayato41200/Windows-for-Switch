@@ -39,7 +39,7 @@ EDK2 platform package, whose history is kept here). It adds:
 | Bluetooth (keyboard, audio) | UEFI R390 (chip power, DSDT BTH0) + `switchbt.sys` + inbox BthMini. Bring your own `BCM4356A3.hcd` patch. Range is very short for now |
 | Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
-Not done: GPU acceleration (basic display only), audio, Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
+Not done: GPU acceleration (basic display only), audio (UEFI R400 plays a test tone through the speakers; no Windows driver yet), Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
 
 ## Tested OS
 
@@ -55,7 +55,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R392.sh`. |
+| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R392.sh` (audio bring-up: `package-R401.sh`). |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Setup helpers: the login fix and the driver inventory script. The drivers themselves are in [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers). |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -77,6 +77,8 @@ Bring your own Windows image and license. This repository does not contain Windo
 ## Which UEFI revision
 
 Use R392 (notes: `docs/ja/uefi-revisions/R392-README-ja.md`). It is R390 with the XUSB firmware read from the ESP and the Bluetooth UART clock reset at every boot. Do not use R391: its UART clock setting is wrong.
+
+R393–R401 are the audio bring-up (notes: `docs/ja/uefi-revisions/R401-README-ja.md`). R400 played a test tone at boot; R401 turns that tone off by default. R401 has not been tested on the console yet.
 
 ## No prebuilt ROM
 

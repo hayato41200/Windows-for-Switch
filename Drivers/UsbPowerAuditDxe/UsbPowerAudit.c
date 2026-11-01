@@ -3938,6 +3938,12 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
 // feeds the I2S at 0x702D1100; I2S1 stayed without a clock (R399: its RX soft
 // reset never finished, it took nothing from ADMAIF1).
 #define CAR_CLK_SOURCE_I2S1  0x1D8U
+// R401: R400 played the tone (loud, through the speakers). The one-second
+// tone at every boot is now off; set this to 1 to hear it again (bring-up
+// check of codec, I2S1, XBAR, ADMAIF and ADMA). The codec probe still runs.
+#ifndef SWITCH_AUDIO_TEST_TONE
+#define SWITCH_AUDIO_TEST_TONE 0
+#endif
 #define CAR_CLK_SOURCE_EXT1  0x3ECU
 #define CAR_CLK_SOURCE_APE   0x6C0U
 
@@ -4651,7 +4657,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R400 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R401 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4682,7 +4688,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R379SensorsPowerOn ();
   R390BluetoothPowerOn ();
   R393AudioProbe ();
-  if (mR395CodecAnswers) R395AudioTone ();
+  if (SWITCH_AUDIO_TEST_TONE && mR395CodecAnswers) R395AudioTone ();
   // R397: the codec went through I2cLib, which leaves I2C1 out of packet mode;
   // the BM92T reads then failed (R396: "BM92T read FAIL", USB skipped).
   ((volatile UINT32 *)BASE_ADDR)[CNFG] |= 0x400U;

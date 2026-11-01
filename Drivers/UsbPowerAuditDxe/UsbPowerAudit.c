@@ -4032,6 +4032,15 @@ STATIC VOID R393AudioProbe (VOID) {
 #define ADMA_CONFIG_1BUF     ((5U << 20) | 1U)                                    // burst 16 words, WRR weight 1
 #define ADMA_FIFO_TX3        (3U << 8)
 #define ADMAIF_PACK16        (1U << 30)
+// R399: R398's ADMA ran and ADMAIF1 filled up, but I2S1 took nothing (its
+// status never changed). Linux resets the I2S RX path right before it is
+// enabled (tegra210_i2s_init -> tegra210_i2s_sw_reset: keep CIF/stream/CTRL,
+// RX_SOFT_RESET, wait, write them back); do the same. More status is shown.
+#define I2S_RX_SOFT_RESET    0x04U
+#define I2S_RX_INT_STATUS    0x10U
+#define I2S_STATUS           0x8CU
+#define I2S_INT_STATUS       0x90U
+#define ADMAIF_TX1_INT_STATUS 0x310U
 #define I2S_RX_INT_MASK      0x14U
 #define I2S_TX_INT_MASK      0x54U
 #define I2S_TX_CIF_CTRL      0x60U
@@ -4181,6 +4190,9 @@ STATIC VOID R395AudioTone (VOID) {
                      CAR_RST_DEV_L_CLR, CLK_L_I2S1_BIT, CAR_CLK_SOURCE_I2S1, (3U << 30) | Div);
   Car[CAR_CLK_SOURCE_I2S1 / 4] = (3U << 30) | Div;   // clk_m / ((Div + 2) / 2)
   gBS->Stall (10);
+  Print (L"R399 audio I2S1 clock: enabled=%u in reset=%u src=%08x\r\n",
+         (Car[CAR_CLK_OUT_ENB_L / 4] >> 11) & 1U, (Car[CAR_RST_DEVICES_L / 4] >> 11) & 1U,
+         Car[CAR_CLK_SOURCE_I2S1 / 4]);
 
   // DAP1 pins to I2S1 (function 0), Tegra drives SCLK, FS and DOUT.
   Pin[PINMUX_DAP1_FS / 4] = PINMUX_PULL_DOWN_BITS | PINMUX_INPUT_EN_BIT;
@@ -4219,6 +4231,19 @@ STATIC VOID R395AudioTone (VOID) {
   Admaif[ADMAIF_TX1_FIFO_CTRL / 4] = ADMAIF_TX1_FIFO_CTRL_DEFAULT;
   Admaif[ADMAIF_TX1_ACIF_CTRL / 4] = ADMAIF_PACK16 | ACIF_16BIT_STEREO;
   Admaif[ADMAIF_TX1_ENABLE / 4] = 1;
+  // Linux tegra210_i2s_sw_reset for playback, then enable.
+  {
+    UINT32 Cif = I2s[I2S_RX_CIF_CTRL / 4], Stream = I2s[I2S_RX_CTRL / 4], Ctrl = I2s[I2S_CTRL / 4];
+    UINTN Poll;
+    I2s[I2S_RX_SOFT_RESET / 4] = 1;
+    for (Poll = 0; Poll < 1000 && (I2s[I2S_RX_SOFT_RESET / 4] & 1U) != 0; ++Poll) gBS->Stall (10);
+    I2s[I2S_RX_CIF_CTRL / 4] = Cif;
+    I2s[I2S_RX_CTRL / 4] = Stream;
+    I2s[I2S_CTRL / 4] = Ctrl;
+    Print (L"R399 audio I2S1 RX soft reset: %s (%u polls) CTRL=%08x RX_CTRL=%08x RX_CIF=%08x TIMING=%08x\r\n",
+           (I2s[I2S_RX_SOFT_RESET / 4] & 1U) ? L"STUCK" : L"done", (UINT32)Poll,
+           I2s[I2S_CTRL / 4], I2s[I2S_RX_CTRL / 4], I2s[I2S_RX_CIF_CTRL / 4], I2s[I2S_TIMING / 4]);
+  }
   I2s[I2S_RX_ENABLE / 4] = 1;
   I2s[I2S_ENABLE / 4] = 1;                     // BCLK and LRCK run from here
   gBS->Stall (5000);
@@ -4258,6 +4283,9 @@ STATIC VOID R395AudioTone (VOID) {
       Print (L"R398 audio mid-tone: ADMA st=%08x xfer=%08x ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
              Adma[ADMA_CH_STATUS / 4], Adma[ADMA_CH_XFER_STATUS / 4], Admaif[ADMAIF_TX1_STATUS / 4],
              I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
+      Print (L"R399 audio mid-tone: I2S en=%08x rx_en=%08x status=%08x int=%08x rx_int=%08x ADMAIF int=%08x XBAR=%08x\r\n",
+             I2s[I2S_ENABLE / 4], I2s[I2S_RX_ENABLE / 4], I2s[I2S_STATUS / 4], I2s[I2S_INT_STATUS / 4],
+             I2s[I2S_RX_INT_STATUS / 4], Admaif[ADMAIF_TX1_INT_STATUS / 4], Xbar[XBAR_I2S1_RX_MUX / 4]);
       gBS->Stall (500000);
       Adma[ADMA_CH_CMD / 4] = 0;
       gBS->Stall (1000);
@@ -4618,7 +4646,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R398 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R399 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

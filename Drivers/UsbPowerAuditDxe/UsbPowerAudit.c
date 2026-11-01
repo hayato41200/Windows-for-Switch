@@ -3932,7 +3932,12 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
 #define PMC_PG_APE_BIT       27U         // TEGRA_POWERGATE_AUD
 #define CAR_CLK_OUT_ENB_V    0x360U
 #define CAR_PLLA_BASE        0x0B0U
-#define CAR_CLK_SOURCE_I2S1  0x100U
+// R400: the AHUB I2S at 0x702D1000 (Linux "I2S1", DAP1, the codec's) is
+// clocked by the CAR clock named i2s0 (Linux DT: TEGRA210_CLK_I2S0 = 30,
+// source register 0x1D8). R395-R399 started CAR i2s1 (bit 11, 0x100), which
+// feeds the I2S at 0x702D1100; I2S1 stayed without a clock (R399: its RX soft
+// reset never finished, it took nothing from ADMAIF1).
+#define CAR_CLK_SOURCE_I2S1  0x1D8U
 #define CAR_CLK_SOURCE_EXT1  0x3ECU
 #define CAR_CLK_SOURCE_APE   0x6C0U
 
@@ -4057,7 +4062,7 @@ STATIC VOID R393AudioProbe (VOID) {
 #define I2S_TIMING           0xA4U
 #define ACIF_16BIT_STEREO    ((1U << 20) | (1U << 16) | (3U << 12) | (3U << 8))
 #define CAR_SPARE_REG0       0x55CU
-#define CLK_L_I2S1_BIT       (1U << 11)
+#define CLK_L_I2S1_BIT       (1U << 30)
 // R396: R395 hung at the first APE register: the AHUB/XBAR/I2S/ADMAIF need the
 // d_audio clock (Linux: one of the APE partition's clocks), which was off
 // (CLK_OUT_ENB_V bit 10 = 0). d_audio from clk_m (mux value 0xC000 at bit 16).
@@ -4191,7 +4196,7 @@ STATIC VOID R395AudioTone (VOID) {
   Car[CAR_CLK_SOURCE_I2S1 / 4] = (3U << 30) | Div;   // clk_m / ((Div + 2) / 2)
   gBS->Stall (10);
   Print (L"R399 audio I2S1 clock: enabled=%u in reset=%u src=%08x\r\n",
-         (Car[CAR_CLK_OUT_ENB_L / 4] >> 11) & 1U, (Car[CAR_RST_DEVICES_L / 4] >> 11) & 1U,
+         (Car[CAR_CLK_OUT_ENB_L / 4] >> 30) & 1U, (Car[CAR_RST_DEVICES_L / 4] >> 30) & 1U,
          Car[CAR_CLK_SOURCE_I2S1 / 4]);
 
   // DAP1 pins to I2S1 (function 0), Tegra drives SCLK, FS and DOUT.
@@ -4646,7 +4651,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R399 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R400 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");

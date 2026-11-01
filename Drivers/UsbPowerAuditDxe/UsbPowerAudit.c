@@ -3944,6 +3944,11 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
 #ifndef SWITCH_AUDIO_TEST_TONE
 #define SWITCH_AUDIO_TEST_TONE 0
 #endif
+// R402: the audio path is always set up for Windows (switchaudio.sys, ACPI
+// AUD0): clocks, DAP1, codec, XBAR, ADMAIF1 and I2S1 stay running, only the
+// ADMA channel is left to the driver. Speaker volume 0x1414: -18 dB (the
+// R400 tone at 0x0808 = 0 dB was loud); Windows scales below that.
+#define R402_SPK_VOL         0x1414U
 #define CAR_CLK_SOURCE_EXT1  0x3ECU
 #define CAR_CLK_SOURCE_APE   0x6C0U
 
@@ -4155,12 +4160,12 @@ STATIC BOOLEAN R395CodecSetup (VOID) {
   Ok &= R395CodecUpdate (RT5640_SPO_R_MIXER, 1U << 12, 0);
   Ok &= R395CodecUpdate (RT5640_PWR_MIXER, 0, (1U << 13) | (1U << 12));
   Ok &= R395CodecUpdate (RT5640_PWR_VOL, 0, (1U << 15) | (1U << 14));
-  // Speaker volume -12 dB (8 steps of 1.5 dB), unmuted.
+  // Speaker volume 0 dB (register 8 of 0..39, +12 dB down to -46.5 dB in 1.5 dB steps), unmuted.
   Ok &= R395CodecWrite (RT5640_SPK_VOL, 0x0808);
   return Ok;
 }
 
-STATIC VOID R395AudioTone (VOID) {
+STATIC VOID R395AudioTone (BOOLEAN PlayTone) {
   volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   volatile UINT32 *Admaif = (volatile UINT32 *)APE_ADMAIF_BASE;
@@ -4266,7 +4271,7 @@ STATIC VOID R395AudioTone (VOID) {
          Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
 
   // R398: one second of tone through ADMA channel 0.
-  {
+  if (PlayTone) {
     volatile UINT32 *Adma = (volatile UINT32 *)APE_ADMA_BASE;
     EFI_PHYSICAL_ADDRESS Buffer = 0xFFFFFFFFULL;
     UINT32 *Words;
@@ -4307,11 +4312,9 @@ STATIC VOID R395AudioTone (VOID) {
   Print (L"R395 audio tone: done; ADMAIF st=%08x I2S st=%08x fifo=%08x\r\n",
          Admaif[ADMAIF_TX1_STATUS / 4], I2s[I2S_RX_STATUS / 4], I2s[I2S_RX_CIF_FIFO_STATUS / 4]);
 
-  // Quiet again: speaker muted, I2S and ADMAIF stopped (Windows will set them up itself).
-  (VOID)R395CodecWrite (RT5640_SPK_VOL, 0xC8C8);
-  I2s[I2S_RX_ENABLE / 4] = 0;
-  I2s[I2S_ENABLE / 4] = 0;
-  Admaif[ADMAIF_TX1_ENABLE / 4] = 0;
+  // R402: leave the path running for Windows; only the speaker level changes.
+  Print (L"R402 audio: left running for Windows, speaker volume %04x: %s\r\n", R402_SPK_VOL,
+         R395CodecWrite (RT5640_SPK_VOL, (UINT16)R402_SPK_VOL) ? L"ok" : L"I2C FAIL");
 }
 
 STATIC VOID R390BluetoothPowerOn (VOID) {
@@ -4657,7 +4660,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R401 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R402 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -4688,7 +4691,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   R379SensorsPowerOn ();
   R390BluetoothPowerOn ();
   R393AudioProbe ();
-  if (SWITCH_AUDIO_TEST_TONE && mR395CodecAnswers) R395AudioTone ();
+  if (mR395CodecAnswers) R395AudioTone (SWITCH_AUDIO_TEST_TONE != 0);
   // R397: the codec went through I2cLib, which leaves I2C1 out of packet mode;
   // the BM92T reads then failed (R396: "BM92T read FAIL", USB skipped).
   ((volatile UINT32 *)BASE_ADDR)[CNFG] |= 0x400U;

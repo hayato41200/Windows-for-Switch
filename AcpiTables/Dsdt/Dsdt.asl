@@ -392,6 +392,26 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R402: audio for switchaudio.sys (ACPI\SWOA0C01). AHUB (ADMAIF, XBAR,
+        // I2S1 at 0x702D1000), ADMA, and the ALC5639 codec on I2C1. UEFI turns
+        // on the APE clocks, sets up the codec and starts I2S1.
+        Device (AUD0)
+        {
+            Name (_HID, "SWOA0C01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x702D0000, 0x00002000)
+                Memory32Fixed (ReadWrite, 0x702E2000, 0x00001000)
+                I2cSerialBusV2 (0x001C, ControllerInitiated, 100000, AddressingMode7Bit, "\\_SB.I2C1", 0x00, ResourceConsumer, , Exclusive, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
         // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
         // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
         Device (PWRB)

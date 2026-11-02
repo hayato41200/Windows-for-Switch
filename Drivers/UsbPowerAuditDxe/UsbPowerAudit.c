@@ -3949,6 +3949,23 @@ STATIC UINTN R390UartEvent (UINT8 *Buf, UINTN Max, UINTN TimeoutMs) {
 // ADMA channel is left to the driver. Speaker volume 0x1414: -18 dB (the
 // R400 tone at 0x0808 = 0 dB was loud); Windows scales below that.
 #define R402_SPK_VOL         0x1414U
+// R403: headphones. DAC1 -> OUT MIX -> HPOVOL -> HPO MIX -> HP amp (rt5640
+// hp_amp_power_on and pmu_depop), HP volume 0x1818 (-24 dB). The jack
+// switch is PV6 (TOUCH_RST pad, Linux realtek,jack-detect-gpios, active
+// low): the pad becomes a GPIO input, and whichever output the jack picks
+// at boot is unmuted. switchaudio.sys follows the jack after that.
+#define R403_HP_VOL          0x1818U
+#define R403_MUTE            0x8080U       // L and R mute bits of SPK_VOL / HP_VOL
+#define GPIO_PV_OFFSET       0x504U        // port V: bank 5, port 1
+#define PINMUX_TOUCH_RST_PV6 0x214U
+#define RT5640_HP_VOL        0x02
+#define RT5640_HPO_MIXER     0x45
+#define RT5640_OUT_L3_MIXER  0x4F
+#define RT5640_OUT_R3_MIXER  0x52
+#define RT5640_DEPOP_M1      0x8E
+#define RT5640_DEPOP_M2      0x8F
+#define RT5640_DEPOP_M3      0x90
+#define RT5640_CHARGE_PUMP   0x91
 #define CAR_CLK_SOURCE_EXT1  0x3ECU
 #define CAR_CLK_SOURCE_APE   0x6C0U
 
@@ -4165,6 +4182,65 @@ STATIC BOOLEAN R395CodecSetup (VOID) {
   return Ok;
 }
 
+// rt5640 private registers go through PRIV_INDEX / PRIV_DATA.
+STATIC BOOLEAN R403PrivUpdate (UINT8 Index, UINT16 Clear, UINT16 Set) {
+  UINT16 Value = 0;
+  if (!R395CodecWrite (RT5640_PRIV_INDEX, Index)) return FALSE;
+  if (!R393CodecRead16 (RT5640_PRIV_DATA, &Value)) return FALSE;
+  return R395CodecWrite (RT5640_PRIV_DATA, (UINT16)((Value & ~Clear) | Set));
+}
+
+STATIC BOOLEAN R403PrivWrite (UINT8 Index, UINT16 Value) {
+  return R395CodecWrite (RT5640_PRIV_INDEX, Index) && R395CodecWrite (RT5640_PRIV_DATA, Value);
+}
+
+// R403: headphone path (muted), then the jack picks the output.
+STATIC VOID R403Headphones (VOID) {
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  BOOLEAN Ok = TRUE;
+  BOOLEAN Plugged;
+
+  Ok &= R395CodecWrite (RT5640_HP_VOL, (UINT16)(R403_HP_VOL | R403_MUTE));
+  // DAC L1/R1 into OUT MIX L/R, HPOVOL into HPO MIX (DAC1 and DAC2 direct stay muted).
+  Ok &= R395CodecUpdate (RT5640_OUT_L3_MIXER, 1U << 0, 0);
+  Ok &= R395CodecUpdate (RT5640_OUT_R3_MIXER, 1U << 0, 0);
+  Ok &= R395CodecUpdate (RT5640_HPO_MIXER, 1U << 13, (1U << 15) | (1U << 14));
+  Ok &= R395CodecUpdate (RT5640_PWR_MIXER, 0, (1U << 15) | (1U << 14));      // OUT MIX L/R
+  Ok &= R395CodecUpdate (RT5640_PWR_VOL, 0, (1U << 11) | (1U << 10));        // HPOVOL L/R
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, 0, (1U << 7) | (1U << 6));        // HP L/R amp
+  // hp_amp_power_on: depop parameters, then the HP amp with FV1/FV2 off for 10 ms.
+  Ok &= R403PrivUpdate (0x24, 0x0700, 0x0200);
+  Ok &= R395CodecUpdate (RT5640_DEPOP_M2, 1U << 13, 1U << 13);
+  Ok &= R395CodecUpdate (RT5640_DEPOP_M1, (1U << 3) | (1U << 2) | 1U, (1U << 3) | 1U);
+  Ok &= R403PrivWrite (0x77, 0x9F00);
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, (1U << 14) | (1U << 3), 0);
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, 0, 1U << 5);
+  gBS->Stall (15000);
+  Ok &= R395CodecUpdate (RT5640_PWR_ANLG1, 0, (1U << 14) | (1U << 3));
+  // pmu_depop: automatic depop, charge pump at HV, pump clocks 192/12/192 kHz.
+  Ok &= R395CodecUpdate (RT5640_DEPOP_M2, (1U << 13) | (1U << 6), 1U << 6);
+  Ok &= R395CodecUpdate (RT5640_CHARGE_PUMP, 3U << 8, 2U << 8);
+  Ok &= R395CodecUpdate (RT5640_DEPOP_M3, 0x0777, (7U << 8) | (3U << 4) | 7U);
+  Ok &= R403PrivWrite (0x37, 0x1C00);
+  Ok &= R395CodecUpdate (RT5640_DEPOP_M1, (1U << 3) | (1U << 2), 1U << 2);
+  Ok &= R403PrivUpdate (0x24, 0x0700, 0x0400);
+
+  // PV6: GPIO input (pad input enabled, output driver off, no pull).
+  Pin[PINMUX_TOUCH_RST_PV6 / 4] = (Pin[PINMUX_TOUCH_RST_PV6 / 4] & ~0x0FU) | (1U << 6) | (1U << 4);
+  (VOID)Pin[PINMUX_TOUCH_RST_PV6 / 4];
+  R366GpioSet (GPIO_PV_OFFSET, GPIO_OE, 6, FALSE);
+  R366GpioSet (GPIO_PV_OFFSET, GPIO_CNF, 6, TRUE);
+  gBS->Stall (1000);
+  Plugged = R366GpioBit (GPIO_PV_OFFSET, GPIO_IN, 6) == 0;
+  if (Plugged) {
+    Ok &= R395CodecWrite (RT5640_SPK_VOL, (UINT16)(R402_SPK_VOL | R403_MUTE));
+    Ok &= R395CodecWrite (RT5640_HP_VOL, (UINT16)R403_HP_VOL);
+  }
+  Print (L"R403 audio: headphone path %s, PV6 pinmux=%08x in=%u: %s\r\n", Ok ? L"ok" : L"I2C FAIL",
+         Pin[PINMUX_TOUCH_RST_PV6 / 4], R366GpioBit (GPIO_PV_OFFSET, GPIO_IN, 6),
+         Plugged ? L"headphones" : L"speaker");
+}
+
 STATIC VOID R395AudioTone (BOOLEAN PlayTone) {
   volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
@@ -4315,6 +4391,7 @@ STATIC VOID R395AudioTone (BOOLEAN PlayTone) {
   // R402: leave the path running for Windows; only the speaker level changes.
   Print (L"R402 audio: left running for Windows, speaker volume %04x: %s\r\n", R402_SPK_VOL,
          R395CodecWrite (RT5640_SPK_VOL, (UINT16)R402_SPK_VOL) ? L"ok" : L"I2C FAIL");
+  R403Headphones ();
 }
 
 STATIC VOID R390BluetoothPowerOn (VOID) {

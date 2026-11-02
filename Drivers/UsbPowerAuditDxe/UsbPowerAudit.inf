@@ -42,6 +42,7 @@
   gEfiUsbIoProtocolGuid
   gEfiBlockIoProtocolGuid
   gEfiSimpleFileSystemProtocolGuid
+  gEfiCpuArchProtocolGuid
 
 [Guids]
   gEfiAcpi20TableGuid

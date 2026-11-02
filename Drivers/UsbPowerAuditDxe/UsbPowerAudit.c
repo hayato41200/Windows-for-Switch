@@ -22,6 +22,7 @@
 #include <Protocol/Usb2HostController.h>
 #include <Protocol/UsbIo.h>
 #include <Protocol/BlockIo.h>
+#include <Protocol/Cpu.h>
 #include <Protocol/Utc/Tegra210/PinMux.h>
 
 #define BASE_ADDR       0x7000C000UL
@@ -6055,6 +6056,18 @@ STATIC UINT8 R404Ldo (UINT8 CfgReg, UINT8 FpsReg) {
   return Cfg;
 }
 
+// R404i: count SErrors during the probe instead of stopping in the default
+// handler (DEBUG builds unmask SError, so it arrives right after the access).
+STATIC volatile UINT32 mR404SErrors;
+STATIC UINT64 mR404Esr, mR404Elr;
+
+STATIC VOID EFIAPI R404SError (IN EFI_EXCEPTION_TYPE Type, IN OUT EFI_SYSTEM_CONTEXT Context) {
+  if (mR404SErrors++ == 0) {
+    mR404Esr = Context.SystemContextAArch64->ESR;
+    mR404Elr = Context.SystemContextAArch64->ELR;
+  }
+}
+
 STATIC VOID R404WifiPcie (VOID) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
@@ -6068,6 +6081,11 @@ STATIC VOID R404WifiPcie (VOID) {
   UINT32 V, PlleWas, UphyWas = 0, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
   CONST CHAR16 *Stage = L"rails";
   UINTN I, Try;
+  EFI_CPU_ARCH_PROTOCOL *Cpu = NULL;
+
+  if (!EFI_ERROR (gBS->LocateProtocol (&gEfiCpuArchProtocolGuid, NULL, (VOID **)&Cpu)) &&
+      EFI_ERROR (Cpu->RegisterInterruptHandler (Cpu, EXCEPT_AARCH64_SERROR, R404SError)))
+    Cpu = NULL;
 
   // Rails: vdd-pex (LDO1) and the PLLE / UPHY supply (LDO7).
   Ldo1 = R404Ldo (MAX77620_LDO1_CFG, MAX77620_FPS_LDO1);
@@ -6241,22 +6259,31 @@ STATIC VOID R404WifiPcie (VOID) {
   // stayed up for 300 ms, but an endpoint read 300 ms later never came back
   // (R404d/e: SError). So do all the endpoint setup at once after link-up,
   // and after that only look at root port registers.
+  // R404i: R404h (Linux fixups) still stopped here. An SError handler now
+  // counts SErrors instead of stopping, and the count is taken after each
+  // endpoint access (S0..S8), so the photo shows which access faults.
   {
-    UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0;
-    Id = Ep[0];
-    if ((Id & 0xFFFFU) == 0x14E4U) {
-      Cls = Ep[0x08 / 4];
-      Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
-      Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;
-      Ep[0x04 / 4] = (Ep[0x04 / 4] & 0xFFFF0000U) | 0x2U;
-      Ep[0x80 / 4] = 0x18000000U;               // BAR0 window -> ChipCommon
-      Win = Ep[0x80 / 4];
-      Cmd = Ep[0x04 / 4];
-      Chip = *(volatile UINT32 *)R404_EP_BAR0;
-    }
+    UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0, S[9];
+    #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
+    ZeroMem (S, sizeof (S));
+    Id = Ep[0];                                   R404_STEP (0);
+    Cls = Ep[0x08 / 4];                           R404_STEP (1);
+    Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0; R404_STEP (2);
+    Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0; R404_STEP (3);
+    Ep[0x04 / 4] = 0x2U;                          R404_STEP (4);   // memory space on
+    Ep[0x80 / 4] = 0x18000000U;                   R404_STEP (5);   // BAR0 window -> ChipCommon
+    Win = Ep[0x80 / 4];                           R404_STEP (6);
+    Cmd = Ep[0x04 / 4];                           R404_STEP (7);
+    if (mR404SErrors == 0) Chip = *(volatile UINT32 *)R404_EP_BAR0;
+    R404_STEP (8);
+    #undef R404_STEP
     for (I = 0; I < 6; I++) { gBS->Stall (50000); Lk[I] = Rp[0x090 / 4]; Vx[I] = Rp[0xF00 / 4]; }
     Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4]);
     Print (L"R404 > EP ID=%08x CLASS=%08x CMD=%08x WIN=%08x CHIP=%08x\r\n", Id, Cls, Cmd, Win, Chip);
+    Print (L"R404 > SErrors after id/cls/bar0/bar2/cmd/win/win/cmd/chip: %u %u %u %u %u %u %u %u %u\r\n",
+           S[0], S[1], S[2], S[3], S[4], S[5], S[6], S[7], S[8]);
+    Print (L"R404 > first SError: ESR=%08x ELR=%lx (R404WifiPcie at %p) AFI INTR CODE=%08x SIG=%08x\r\n",
+           mR404Esr, mR404Elr, (VOID *)R404WifiPcie, Afi[0x0B8 / 4], Afi[0x0BC / 4]);
     Print (L"R404 > link 50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Lk[0], Lk[1], Lk[2], Lk[3], Lk[4], Lk[5]);
     Print (L"R404 > XP   50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Vx[0], Vx[1], Vx[2], Vx[3], Vx[4], Vx[5]);
     Lnk = Lk[5]; Xp = Vx[5];
@@ -6269,7 +6296,9 @@ Done:
          Stage, Car[0x0E8 / 4], UphyWas, Pad[0x360 / 4], Xp, Lnk, Id, Chip);
   if ((Chip & 0xFFFFU) == 0x4356U)
     Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
+  Print (L"R404 wifi: SErrors caught %u (handler %s)\r\n", mR404SErrors, Cpu != NULL ? L"on" : L"MISSING");
   gBS->Stall (8000000);   // time to take a photo of the R404 lines
+  if (Cpu != NULL) Cpu->RegisterInterruptHandler (Cpu, EXCEPT_AARCH64_SERROR, NULL);
 }
 
 // RunTest, then the Wi-Fi PCIe probe (after XUSB has taken PLLE).

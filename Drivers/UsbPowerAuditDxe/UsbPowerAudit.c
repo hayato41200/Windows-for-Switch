@@ -6127,7 +6127,7 @@ STATIC VOID R404WifiPcie (VOID) {
   R366GpioSet (GPIO_PA_OFFSET, GPIO_CNF, 4, FALSE);
   // PEX pads out of deep power down (pex-bias, pex-clk1, pex-clk2).
   if ((Pmc[0x1BC / 4] & 0x70U) != 0) { Pmc[0x1B8 / 4] = (1U << 30) | 0x70U; gBS->Stall (10); }
-  gBS->Stall (150000);
+  gBS->Stall (1000000);   // R404k: 1 s after WIFI_RST high (R404j: 150 ms)
 
   // PCIE partition with its clock and reset, then AFI, then the CML clock.
   R404_AT (L"partition");
@@ -6232,7 +6232,9 @@ STATIC VOID R404WifiPcie (VOID) {
 
   // Port 1: reference clock, PERST# pulse, PCA, refclk drive, then wait for the link.
   R404_AT (L"link");
-  Afi[0x118 / 4] |= (1U << 3) | (1U << 1) | (1U << 4);
+  // R404k: no CLKREQ_EN (bit 1): keep the reference clock running. R404j: the
+  // endpoint answered one config read and then stopped answering.
+  Afi[0x118 / 4] = (Afi[0x118 / 4] & ~(1U << 1)) | (1U << 3) | (1U << 4);
   for (Try = 0; Try < 3; Try++) {
     Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
     if (Try == 0) {
@@ -6282,7 +6284,10 @@ STATIC VOID R404WifiPcie (VOID) {
   {
     UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0, S[9];
     #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
-    #define R404_EP(N) Print (L"R404 > ep %u (SErrors %u)\r\n", (UINT32)(N), mR404SErrors)
+    // R404k: R404j read ep 0 and then hung on ep 1 (no SError). Linux writes
+    // AFI_FPCI_BAR0 before every config access; do the same.
+    #define R404_EP(N) do { Print (L"R404 > ep %u (SErrors %u)\r\n", (UINT32)(N), mR404SErrors); \
+      Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4]; ArmDataSynchronizationBarrier (); } while (0)
     ZeroMem (S, sizeof (S));
     R404_EP (0); Id = Ep[0];                                   R404_STEP (0);
     R404_EP (1); Cls = Ep[0x08 / 4];                           R404_STEP (1);

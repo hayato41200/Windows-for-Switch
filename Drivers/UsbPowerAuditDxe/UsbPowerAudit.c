@@ -6295,12 +6295,23 @@ STATIC VOID R404WifiPcie (VOID) {
   // counts SErrors instead of stopping, and the count is taken after each
   // endpoint access (S0..S8), so the photo shows which access faults.
   {
-    UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0, S[9];
+    UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0, S[9], Aer = 0, Ext;
     #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
+    // R404p: R404o showed no AFI error after ep 0 (code A = presence change,
+    // before it), yet ep 1 hung. Show the root port's own error logs (device
+    // status, AER uncorrectable/correctable: receiver error, bad TLP/DLLP,
+    // replay timeouts, completion timeout) and XP state before each access.
+    for (Ext = 0x100U, I = 0; I < 16 && Ext >= 0x100U && Ext < 0x1000U; I++) {
+      UINT32 H = Rp[Ext / 4];
+      if ((H & 0xFFFFU) == 1U) { Aer = Ext; break; }
+      Ext = H >> 20;
+    }
     // R404k: R404j read ep 0 and then hung on ep 1 (no SError). Linux writes
     // AFI_FPCI_BAR0 before every config access; do the same.
-    #define R404_EP(N) do { Print (L"R404 > ep %u (SErr %u) LNK=%08x AFI code=%x sig=%08x upper=%02x\r\n", (UINT32)(N), \
-      mR404SErrors, Rp[0x090 / 4], Afi[0x0B8 / 4], Afi[0x0BC / 4], Afi[0x0C0 / 4] & 0xFFU); \
+    #define R404_EP(N) do { Print (L"R404 > ep %u (SErr %u) LNK=%08x XP=%08x DEVSTA=%08x AER@%x UE=%08x CE=%08x AFI=%x\r\n", \
+      (UINT32)(N), mR404SErrors, Rp[0x090 / 4], Rp[0xF00 / 4], Rp[0x088 / 4], Aer, \
+      Aer ? Rp[(Aer + 4) / 4] : 0, Aer ? Rp[(Aer + 0x10) / 4] : 0, Afi[0x0B8 / 4]); \
+      if (Aer) { Rp[(Aer + 4) / 4] = 0xFFFFFFFFU; Rp[(Aer + 0x10) / 4] = 0xFFFFFFFFU; } \
       Afi[0x0B8 / 4] = 0; \
       Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4]; ArmDataSynchronizationBarrier (); } while (0)
     // R404m: R404l kept PLLE/UPHY locked and the link up, yet ep 1 hung. Guess:

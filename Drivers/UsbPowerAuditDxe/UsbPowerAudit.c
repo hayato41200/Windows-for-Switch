@@ -6212,7 +6212,24 @@ STATIC VOID R404WifiPcie (VOID) {
   Rp[0x018 / 4] = (Rp[0x018 / 4] & 0xFF000000U) | 0x00010100U;
   Rp[0x020 / 4] = ((UINT32)(R404_MEM_END >> 16) & 0xFFF0U) << 16 | (((UINT32)R404_EP_BAR2 >> 16) & 0xFFF0U);
   Rp[0x004 / 4] = (Rp[0x004 / 4] & 0xFFFF0000U) | 0x6U;
-  Id = Ep[0];
+  // R404d: R404c read 01002080 right after the link came up. Give the endpoint
+  // the 100 ms PCIe asks for after reset, retry, and if the flat window still
+  // reads garbage, use the Linux 4 KiB window (AXI 0x11fff000, FPCI moved per page).
+  gBS->Stall (200000);
+  for (I = 0; I < 10; I++) {
+    Id = Ep[0];
+    if ((Id & 0xFFFFU) == 0x14E4U) break;
+    gBS->Stall (50000);
+  }
+  Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x flat ID=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4], Id);
+  if ((Id & 0xFFFFU) != 0x14E4U) {
+    Afi[0x018 / 4] = 0x11FFF000U;
+    Afi[0x000 / 4] = 1;
+    Afi[0x030 / 4] = 0xFE100000U + ((1U << 16) >> 8);   // bus 1, dev 0, fn 0, page 0
+    Ep = (volatile UINT32 *)0x11FFF000UL;
+    Id = Ep[0];
+    Print (L"R404 > config: 4K window ID=%08x\r\n", Id);
+  }
   if ((Id & 0xFFFFU) != 0x14E4U) goto Done;
   Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
   Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;

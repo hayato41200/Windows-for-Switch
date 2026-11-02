@@ -6176,7 +6176,9 @@ STATIC VOID R404WifiPcie (VOID) {
 
   // Controller: PLLE under pad control, x4/x1 crossbar with only port 1 on, gen2.
   R404_AT (L"controller");
-  Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 9)) | (1U << 1);
+  // R404l: PLLE stays on: bypass the pads-to-PLLE power-down (Linux allows it, but
+  // also starts the PLLE hardware sequencer, which this code does not).
+  Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 1)) | (1U << 9);
   Afi[0x168 / 4] = 0;
   V = Afi[0x0F8 / 4] & ~(0xFU << 20);
   // R404h: CLKREQ as Linux: all ports' CLKREQ_GPIO set, then cleared for port 1.
@@ -6286,7 +6288,8 @@ STATIC VOID R404WifiPcie (VOID) {
     #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
     // R404k: R404j read ep 0 and then hung on ep 1 (no SError). Linux writes
     // AFI_FPCI_BAR0 before every config access; do the same.
-    #define R404_EP(N) do { Print (L"R404 > ep %u (SErrors %u)\r\n", (UINT32)(N), mR404SErrors); \
+    #define R404_EP(N) do { Print (L"R404 > ep %u (SErrors %u) PLLE_MISC=%08x UPHY=%08x LNK=%08x\r\n", (UINT32)(N), \
+      mR404SErrors, Car[0x0EC / 4], Pad[0x360 / 4], Rp[0x090 / 4]); \
       Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4]; ArmDataSynchronizationBarrier (); } while (0)
     ZeroMem (S, sizeof (S));
     R404_EP (0); Id = Ep[0];                                   R404_STEP (0);

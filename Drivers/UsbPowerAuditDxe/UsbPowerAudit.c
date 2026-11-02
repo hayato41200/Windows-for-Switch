@@ -4737,7 +4737,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R402 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio codec + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R404 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe probe + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -5992,12 +5992,248 @@ STATIC VOID R388PrintXusbState (VOID) {
          CpuCtl, Fpci[0xE4 / 4], Fpci[0xE8 / 4], Fpci[0xEC / 4], Fpci[0xF0 / 4]);
 }
 
+// R404: Wi-Fi, stage 1. The BCM4356 Wi-Fi function sits on PCIe port 1 (x1,
+// UPHY lane pcie-0), as in the Linux log of this console (00:02.0 [10de:0faf]
+// -> 01:00.0 [14e4:43ec], BAR2 4 MB at 0x13000000, BAR0 32 KB at 0x13400000).
+// The sequence follows U-Boot pci_tegra.c / tegra210 xusb-padctl.c / clock.c:
+// rails and pins, PCIE partition, AFI, PLLE, UPHY PLL P0, controller, port 1
+// reset, link, then the root port and the endpoint get bus numbers and BARs and
+// the chip ID is read through BAR0 (window 0x18000000 = ChipCommon). Runs after
+// the XUSB bring-up (which wants PLLE off at its start) and leaves the link up.
+#define R404_PADS            0x01003000UL
+#define R404_AFI             0x01003800UL
+#define R404_RP1             0x01001000UL  // port 1 root port registers (00:02.0)
+#define R404_CS              0x02000000UL  // config window, U-Boot layout (bus << 16)
+#define R404_CS_SIZE         0x10000000UL
+#define R404_EP_BAR2         0x13000000UL
+#define R404_EP_BAR0         0x13400000UL
+#define R404_MEM_END         0x135FFFFFUL
+#define R404_CAR_RST_U       0x00C
+#define R404_CAR_CLK_U       0x018
+#define R404_CAR_RST_U_SET   0x310
+#define R404_CAR_RST_U_CLR   0x314
+#define R404_CAR_CLK_U_SET   0x328
+#define R404_U_PCIE          (1U << 6)
+#define R404_U_AFI           (1U << 8)
+#define R404_U_PCIEXCLK      (1U << 10)
+#define R404_PG_PCIE         3U
+#define R404_PG_VDEC         4U            // REMOVE_CLAMPING has PCIE and VDEC swapped
+#define MAX77620_LDO1_CFG    0x25          // vdd-pex 1.05 V
+#define MAX77620_LDO7_CFG    0x31          // vdd-gen-pll-edp 1.05 V (PLLE / UPHY)
+#define MAX77620_FPS_LDO1    0x47
+#define MAX77620_FPS_LDO7    0x4D
+#define PINMUX_PEX_L1_RST_PA3    0x044U
+#define PINMUX_PEX_L1_CLKREQ_PA4 0x048U
+#define PINMUX_WIFI_EN_PH0       0x1B4U
+#define PINMUX_WIFI_RST_PH1      0x1B8U
+#define GPIO_PA_OFFSET       0x000U
+
+STATIC UINT32 R404Wait (volatile UINT32 *Reg, UINT32 Mask, UINT32 Want, UINTN Ms) {
+  UINTN I;
+  for (I = 0; I < Ms * 10; I++) {
+    if ((*Reg & Mask) == Want) break;
+    gBS->Stall (100);
+  }
+  return *Reg;
+}
+
+// LDO on at 1.05 V under software control, if it is off.
+STATIC UINT8 R404Ldo (UINT8 CfgReg, UINT8 FpsReg) {
+  UINT8 Cfg = 0, Fps = 0;
+  if (i2c_recv_buf_small (&Cfg, 1, I2C_5, MAX77620_ADDR, CfgReg) != 1) return 0xEE;
+  if ((Cfg >> 6) == 3) return Cfg;
+  if (i2c_recv_buf_small (&Fps, 1, I2C_5, MAX77620_ADDR, FpsReg) == 1)
+    i2c_send_byte (I2C_5, MAX77620_ADDR, FpsReg, (UINT8)(Fps | 0xC0U));   // FPS source: none
+  i2c_send_byte (I2C_5, MAX77620_ADDR, CfgReg, 0xCA);                      // normal, 800 + 10 x 25 mV
+  gBS->Stall (2000);
+  Cfg = 0;
+  i2c_recv_buf_small (&Cfg, 1, I2C_5, MAX77620_ADDR, CfgReg);
+  return Cfg;
+}
+
+STATIC VOID R404WifiPcie (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *Pad = (volatile UINT32 *)XUSB_PAD_BASE;
+  volatile UINT32 *Pads = (volatile UINT32 *)R404_PADS;
+  volatile UINT32 *Afi = (volatile UINT32 *)R404_AFI;
+  volatile UINT32 *Rp = (volatile UINT32 *)R404_RP1;
+  volatile UINT32 *Ep = (volatile UINT32 *)(R404_CS + (1UL << 16));   // bus 1, dev 0, fn 0
+  UINT8 Ldo1, Ldo7;
+  UINT32 V, PlleWas, UphyWas, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
+  CONST CHAR16 *Stage = L"rails";
+  UINTN I, Try;
+
+  // Rails: vdd-pex (LDO1) and the PLLE / UPHY supply (LDO7).
+  Ldo1 = R404Ldo (MAX77620_LDO1_CFG, MAX77620_FPS_LDO1);
+  Ldo7 = R404Ldo (MAX77620_LDO7_CFG, MAX77620_FPS_LDO7);
+  Print (L"R404 wifi: LDO1(pex)=%02x LDO7(plle)=%02x\r\n", Ldo1, Ldo7);
+  if ((Ldo1 >> 6) != 3 || (Ldo7 >> 6) != 3) goto Done;
+
+  // Wi-Fi power as Linux leaves it: WIFI_EN PH0 low, WIFI_RST PH1 high.
+  Stage = L"pins";
+  Pin[PINMUX_WIFI_EN_PH0 / 4] = (Pin[PINMUX_WIFI_EN_PH0 / 4] & ~0x7FU) | (1U << 2);
+  Pin[PINMUX_WIFI_RST_PH1 / 4] = (Pin[PINMUX_WIFI_RST_PH1 / 4] & ~0x7FU) | (1U << 2);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 0, FALSE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 1, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 0, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 1, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_CNF, 0, TRUE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_CNF, 1, TRUE);
+  // PEX_L1_RST_N (PA3) and PEX_L1_CLKREQ_N (PA4) to the PCIe controller (pe1).
+  Pin[PINMUX_PEX_L1_RST_PA3 / 4] = Pin[PINMUX_PEX_L1_RST_PA3 / 4] & ~0x7FU;
+  Pin[PINMUX_PEX_L1_CLKREQ_PA4 / 4] = (Pin[PINMUX_PEX_L1_CLKREQ_PA4 / 4] & ~0x7FU) | (1U << 6);
+  R366GpioSet (GPIO_PA_OFFSET, GPIO_CNF, 3, FALSE);
+  R366GpioSet (GPIO_PA_OFFSET, GPIO_CNF, 4, FALSE);
+  // PEX pads out of deep power down (pex-bias, pex-clk1, pex-clk2).
+  if ((Pmc[0x1BC / 4] & 0x70U) != 0) { Pmc[0x1B8 / 4] = (1U << 30) | 0x70U; gBS->Stall (10); }
+  gBS->Stall (150000);
+
+  // PCIE partition with its clock and reset, then AFI, then the CML clock.
+  Stage = L"partition";
+  Car[R404_CAR_RST_U_SET / 4] = R404_U_PCIEXCLK | R404_U_AFI | R404_U_PCIE;
+  if (!SetPowerPartition (R404_PG_PCIE, TRUE)) goto Done;
+  Car[R404_CAR_CLK_U_SET / 4] = R404_U_PCIE;
+  gBS->Stall (10);
+  Pmc[0x034 / 4] = 1U << R404_PG_VDEC;
+  gBS->Stall (10);
+  Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIE;
+  Car[R404_CAR_RST_U_CLR / 4] = R404_U_AFI;
+  Car[R404_CAR_CLK_U_SET / 4] = R404_U_AFI;
+  Car[0x48C / 4] = (Car[0x48C / 4] | 1U) & ~2U;
+
+  // PLLE 100 MHz (TRM cold boot sequence), unless XUSB already runs it.
+  Stage = L"PLLE";
+  PlleWas = Car[0x0E8 / 4];
+  if ((PlleWas & (1U << 31)) == 0) {
+    Car[0x48C / 4] &= ~(1U << 28);
+    Car[0x0EC / 4] &= ~(1U << 13);
+    gBS->Stall (5);
+    Car[0x0E8 / 4] = (Car[0x0E8 / 4] & ~((0x1FU << 24) | (0xFFU << 8) | 0xFFU)) |
+                     (0xEU << 24) | (0x7DU << 8) | 2U;
+    Car[0x0EC / 4] = (Car[0x0EC / 4] | (1U << 8)) & ~((3U << 6) | (3U << 2) | 1U);
+    Car[0x0E8 / 4] |= 1U << 31;
+    if ((R404Wait (&Car[0x0EC / 4], 1U << 11, 1U << 11, 250) & (1U << 11)) == 0) goto Done;
+    V = Car[0x068 / 4];
+    V &= ~((0xFFU << 16) | (0x3FU << 24) | 0x1FFU | (1U << 15) | (1U << 14) | (1U << 10) | (1U << 12));
+    V |= (1U << 16) | (0x23U << 24) | 0x21U;
+    Car[0x068 / 4] = V;
+    gBS->Stall (1);
+    Car[0x068 / 4] = V & ~(1U << 11);
+  }
+
+  // PADCTL: clamps off, UPHY out of reset, lane pcie-0 = pcie-x1 with IDDQ disabled.
+  Stage = L"padctl";
+  Pad[0x024 / 4] &= ~(1U << 29); gBS->Stall (100);
+  Pad[0x024 / 4] &= ~(1U << 30); gBS->Stall (100);
+  Pad[0x024 / 4] &= ~(1U << 31);
+  Car[0x2A4 / 4] &= ~(1U << 13);
+  Pad[0x028 / 4] = (Pad[0x028 / 4] & ~(3U << 12)) | (1U << 1);
+
+  // Controller: PLLE under pad control, x4/x1 crossbar with only port 1 on, gen2.
+  Stage = L"controller";
+  Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 9)) | (1U << 1);
+  Afi[0x168 / 4] = 0;
+  V = Afi[0x0F8 / 4] & ~(0xFU << 20);
+  Afi[0x0F8 / 4] = (V | 0xEU | (1U << 20)) & ~(1U << 2);
+  Afi[0x104 / 4] &= ~(1U << 2);
+
+  // UPHY PLL P0: calibration, lock, register calibration (unless already locked).
+  Stage = L"UPHY PLL";
+  UphyWas = Pad[0x360 / 4];
+  if ((UphyWas & (1U << 15)) == 0) {
+    Pad[0x364 / 4] = (Pad[0x364 / 4] & ~(0xFFFFFFU << 4)) | (0x136U << 4);
+    Pad[0x370 / 4] = (Pad[0x370 / 4] & ~(0xFFU << 16)) | (0x2AU << 16);
+    Pad[0x360 / 4] |= 1U << 4;
+    Pad[0x364 / 4] |= 1U << 2;
+    Pad[0x37C / 4] |= 1U << 15;
+    Pad[0x36C / 4] = (Pad[0x36C / 4] & ~((3U << 12) | (0xFU << 4))) | (2U << 12) | (1U << 15);
+    Pad[0x360 / 4] = (Pad[0x360 / 4] & ~((3U << 16) | (0xFFU << 20))) | (25U << 20);
+    Pad[0x360 / 4] &= ~1U;
+    Pad[0x360 / 4] &= ~(3U << 1);
+    gBS->Stall (1);
+    Pad[0x36C / 4] |= 1U << 8;
+    Pad[0x364 / 4] |= 1U;
+    if ((R404Wait (&Pad[0x364 / 4], 2U, 2U, 250) & 2U) == 0) goto Done;
+    Pad[0x364 / 4] &= ~1U;
+    if ((R404Wait (&Pad[0x364 / 4], 2U, 0, 250) & 2U) != 0) goto Done;
+    Pad[0x360 / 4] |= 1U << 3;
+    if ((R404Wait (&Pad[0x360 / 4], 1U << 15, 1U << 15, 250) & (1U << 15)) == 0) goto Done;
+    Pad[0x37C / 4] |= (1U << 13) | (1U << 12);
+    if ((R404Wait (&Pad[0x37C / 4], 1U << 31, 1U << 31, 250) & (1U << 31)) == 0) goto Done;
+    Pad[0x37C / 4] &= ~(1U << 12);
+    if ((R404Wait (&Pad[0x37C / 4], 1U << 31, 0, 250) & (1U << 31)) != 0) goto Done;
+    Pad[0x37C / 4] &= ~(1U << 13);
+  }
+
+  // PCIEXCLK out of reset, FPCI on, AFI interrupts off.
+  Stage = L"FPCI";
+  Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIEXCLK;
+  Afi[0x0AC / 4] |= 1U;
+  Afi[0x0C8 / 4] = 0; Afi[0x0C4 / 4] = 0; Afi[0x0B4 / 4] = 0; Afi[0x0B0 / 4] = 0;
+
+  // Translations: BAR0 config, BAR1 I/O, BAR2 prefetchable, BAR3 memory.
+  Afi[0x018 / 4] = (UINT32)R404_CS;    Afi[0x000 / 4] = (UINT32)(R404_CS_SIZE >> 12); Afi[0x030 / 4] = 0xFE100000U;
+  Afi[0x01C / 4] = 0x12000000U;        Afi[0x004 / 4] = 0x10000U >> 12;               Afi[0x034 / 4] = 0xFDFC0000U;
+  Afi[0x020 / 4] = 0x20000000U;        Afi[0x008 / 4] = 0x20000000U >> 12;            Afi[0x038 / 4] = (0x20000U << 4) | 1U;
+  Afi[0x024 / 4] = 0x13000000U;        Afi[0x00C / 4] = 0x0D000000U >> 12;            Afi[0x03C / 4] = (0x13000U << 4) | 1U;
+  Afi[0x028 / 4] = 0; Afi[0x010 / 4] = 0; Afi[0x040 / 4] = 0;
+  Afi[0x02C / 4] = 0; Afi[0x014 / 4] = 0; Afi[0x044 / 4] = 0;
+  Afi[0x04C / 4] = 0x80000000U; Afi[0x048 / 4] = 0; Afi[0x054 / 4] = 0; Afi[0x050 / 4] = 0;
+  Afi[0x064 / 4] = 0; Afi[0x060 / 4] = 0; Afi[0x068 / 4] = 0;
+
+  // Port 1: reference clock, PERST# pulse, PCA, refclk drive, then wait for the link.
+  Stage = L"link";
+  Afi[0x118 / 4] |= (1U << 3) | (1U << 1) | (1U << 4);
+  for (Try = 0; Try < 3; Try++) {
+    Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
+    if (Try == 0) {
+      Rp[0xFA8 / 4] |= 1U << 7;
+      Pads[0x0C8 / 4] = 0x90B890B8U;
+      Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~0xFU) | 0xEU;
+    }
+    Xp = R404Wait (&Rp[0xF00 / 4], 1U << 30, 1U << 30, 400);
+    if ((Xp & (1U << 30)) == 0) continue;
+    Lnk = R404Wait (&Rp[0x090 / 4], 1U << 29, 1U << 29, 400);
+    if ((Lnk & (1U << 29)) != 0) break;
+  }
+  if ((Lnk & (1U << 29)) == 0) goto Done;
+
+  // Root port: bus 0 -> 1, memory window, memory + bus master. Endpoint: BARs, memory.
+  Stage = L"config";
+  Rp[0x018 / 4] = (Rp[0x018 / 4] & 0xFF000000U) | 0x00010100U;
+  Rp[0x020 / 4] = ((UINT32)(R404_MEM_END >> 16) & 0xFFF0U) << 16 | (((UINT32)R404_EP_BAR2 >> 16) & 0xFFF0U);
+  Rp[0x004 / 4] = (Rp[0x004 / 4] & 0xFFFF0000U) | 0x6U;
+  Id = Ep[0];
+  if ((Id & 0xFFFFU) != 0x14E4U) goto Done;
+  Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
+  Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;
+  Ep[0x04 / 4] = (Ep[0x04 / 4] & 0xFFFF0000U) | 0x2U;
+  Ep[0x80 / 4] = 0x18000000U;                 // BAR0 window -> ChipCommon
+  for (I = 0; I < 10 && Ep[0x80 / 4] != 0x18000000U; I++) gBS->Stall (100);
+  Chip = *(volatile UINT32 *)R404_EP_BAR0;
+  Stage = L"done";
+
+Done:
+  Print (L"R404 wifi: %s. PLLE=%08x UPHY=%08x->%08x XP=%08x LNK=%08x ID=%08x chip=%08x\r\n",
+         Stage, Car[0x0E8 / 4], UphyWas, Pad[0x360 / 4], Xp, Lnk, Id, Chip);
+  if ((Chip & 0xFFFFU) == 0x4356U)
+    Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
+}
+
+// RunTest, then the Wi-Fi PCIe probe (after XUSB has taken PLLE).
+STATIC VOID EFIAPI R404RunAll (EFI_EVENT Event, VOID *Context) {
+  RunTest (Event, Context);
+  R404WifiPcie ();
+}
+
 EFI_STATUS EFIAPI UsbPowerAuditEntryPoint (
   IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable) {
   EFI_STATUS E;
   gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, R386MaskGpioIrq, NULL, &mR386ExitEvent);
   E = gBS->CreateEvent (EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK,
-                        RunTest, SystemTable, &mStartEvent);
+                        R404RunAll, SystemTable, &mStartEvent);
   if (EFI_ERROR (E)) return E;
   E = gBS->SetTimer (mStartEvent, TimerRelative, 10ULL * 1000ULL * 1000ULL * 10ULL);
   if (EFI_ERROR (E)) gBS->CloseEvent (mStartEvent);

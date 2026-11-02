@@ -6291,6 +6291,32 @@ STATIC VOID R404WifiPcie (VOID) {
     #define R404_EP(N) do { Print (L"R404 > ep %u (SErrors %u) PLLE_MISC=%08x UPHY=%08x LNK=%08x\r\n", (UINT32)(N), \
       mR404SErrors, Car[0x0EC / 4], Pad[0x360 / 4], Rp[0x090 / 4]); \
       Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4]; ArmDataSynchronizationBarrier (); } while (0)
+    // R404m: R404l kept PLLE/UPHY locked and the link up, yet ep 1 hung. Guess:
+    // after the first access the BCM4356 answers with CRS (retry) and the root
+    // port retries silently. Turn CRS Software Visibility on, so a vendor ID
+    // read returns 0x0001 while the chip is busy, and poll until it is back.
+    {
+      UINT32 Cap = Rp[0x034 / 4] & 0xFCU, RootCaps = 0, Seen[6], NSeen = 0, Ms = 0, V0;
+      for (I = 0; I < 16 && Cap >= 0x40U && Cap < 0x100U; I++) {
+        V0 = Rp[Cap / 4];
+        if ((V0 & 0xFFU) == 0x10U) break;
+        Cap = (V0 >> 8) & 0xFCU;
+      }
+      if (Cap >= 0x40U && Cap < 0x100U && (Rp[Cap / 4] & 0xFFU) == 0x10U) {
+        RootCaps = Rp[(Cap + 0x1C) / 4];
+        Rp[(Cap + 0x1C) / 4] = (RootCaps & 0xFFFFU) | (1U << 4);    // Root Control: CRSSVE
+      }
+      ZeroMem (Seen, sizeof (Seen));
+      for (Ms = 0; Ms < 5000; Ms++) {
+        Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4];
+        V0 = Ep[0];
+        if (NSeen == 0 || (Seen[NSeen - 1] != V0 && NSeen < 6)) Seen[NSeen++] = V0;
+        if (Ms > 0 && (V0 & 0xFFFFU) == 0x14E4U) break;
+        gBS->Stall (1000);
+      }
+      Print (L"R404 > CRS: cap=%02x rootcaps/ctl=%08x->%08x vendor reads %08x %08x %08x %08x after %u ms\r\n",
+             Cap, RootCaps, Cap < 0x100U ? Rp[(Cap + 0x1C) / 4] : 0, Seen[0], Seen[1], Seen[2], Seen[3], Ms);
+    }
     ZeroMem (S, sizeof (S));
     R404_EP (0); Id = Ep[0];                                   R404_STEP (0);
     R404_EP (1); Cls = Ep[0x08 / 4];                           R404_STEP (1);

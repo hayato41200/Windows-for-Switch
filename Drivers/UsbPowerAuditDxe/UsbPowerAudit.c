@@ -6003,8 +6003,9 @@ STATIC VOID R388PrintXusbState (VOID) {
 #define R404_PADS            0x01003000UL
 #define R404_AFI             0x01003800UL
 #define R404_RP1             0x01001000UL  // port 1 root port registers (00:02.0)
-#define R404_CS              0x02000000UL  // config window, U-Boot layout (bus << 16)
-#define R404_CS_SIZE         0x10000000UL
+#define R404_CS              0x11FFF000UL  // 4 KiB config window, as Linux ("cs")
+#define R404_CS_SIZE         0x1000UL
+#define R404_CS_FPCI         (0xFE100000U + ((1U << 16) >> 8))   // page of bus 1, dev 0, fn 0
 #define R404_EP_BAR2         0x13000000UL
 #define R404_EP_BAR0         0x13400000UL
 #define R404_MEM_END         0x135FFFFFUL
@@ -6062,7 +6063,7 @@ STATIC VOID R404WifiPcie (VOID) {
   volatile UINT32 *Pads = (volatile UINT32 *)R404_PADS;
   volatile UINT32 *Afi = (volatile UINT32 *)R404_AFI;
   volatile UINT32 *Rp = (volatile UINT32 *)R404_RP1;
-  volatile UINT32 *Ep = (volatile UINT32 *)(R404_CS + (1UL << 16));   // bus 1, dev 0, fn 0
+  volatile UINT32 *Ep = (volatile UINT32 *)R404_CS;   // bus 1, dev 0, fn 0 (R404_CS_FPCI)
   UINT8 Ldo1, Ldo7;
   UINT32 V, PlleWas, UphyWas = 0, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
   CONST CHAR16 *Stage = L"rails";
@@ -6181,7 +6182,7 @@ STATIC VOID R404WifiPcie (VOID) {
   Afi[0x0C8 / 4] = 0; Afi[0x0C4 / 4] = 0; Afi[0x0B4 / 4] = 0; Afi[0x0B0 / 4] = 0;
 
   // Translations: BAR0 config, BAR1 I/O, BAR2 prefetchable, BAR3 memory.
-  Afi[0x018 / 4] = (UINT32)R404_CS;    Afi[0x000 / 4] = (UINT32)(R404_CS_SIZE >> 12); Afi[0x030 / 4] = 0xFE100000U;
+  Afi[0x018 / 4] = (UINT32)R404_CS;    Afi[0x000 / 4] = (UINT32)(R404_CS_SIZE >> 12); Afi[0x030 / 4] = R404_CS_FPCI;
   Afi[0x01C / 4] = 0x12000000U;        Afi[0x004 / 4] = 0x10000U >> 12;               Afi[0x034 / 4] = 0xFDFC0000U;
   Afi[0x020 / 4] = 0x20000000U;        Afi[0x008 / 4] = 0x20000000U >> 12;            Afi[0x038 / 4] = (0x20000U << 4) | 1U;
   Afi[0x024 / 4] = 0x13000000U;        Afi[0x00C / 4] = 0x0D000000U >> 12;            Afi[0x03C / 4] = (0x13000U << 4) | 1U;
@@ -6212,24 +6213,13 @@ STATIC VOID R404WifiPcie (VOID) {
   Rp[0x018 / 4] = (Rp[0x018 / 4] & 0xFF000000U) | 0x00010100U;
   Rp[0x020 / 4] = ((UINT32)(R404_MEM_END >> 16) & 0xFFF0U) << 16 | (((UINT32)R404_EP_BAR2 >> 16) & 0xFFF0U);
   Rp[0x004 / 4] = (Rp[0x004 / 4] & 0xFFFF0000U) | 0x6U;
-  // R404d: R404c read 01002080 right after the link came up. Give the endpoint
-  // the 100 ms PCIe asks for after reset, retry, and if the flat window still
-  // reads garbage, use the Linux 4 KiB window (AXI 0x11fff000, FPCI moved per page).
+  // R404e: the U-Boot 256 MB config window gave garbage (R404c: 01002080) and
+  // then an SError (R404d). Use the Linux one: a 4 KiB AXI window at 0x11fff000
+  // whose FPCI page is moved per access; bus 1 dev 0 regs 0-0xff are one page.
+  Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4]);
   gBS->Stall (200000);
-  for (I = 0; I < 10; I++) {
-    Id = Ep[0];
-    if ((Id & 0xFFFFU) == 0x14E4U) break;
-    gBS->Stall (50000);
-  }
-  Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x flat ID=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4], Id);
-  if ((Id & 0xFFFFU) != 0x14E4U) {
-    Afi[0x018 / 4] = 0x11FFF000U;
-    Afi[0x000 / 4] = 1;
-    Afi[0x030 / 4] = 0xFE100000U + ((1U << 16) >> 8);   // bus 1, dev 0, fn 0, page 0
-    Ep = (volatile UINT32 *)0x11FFF000UL;
-    Id = Ep[0];
-    Print (L"R404 > config: 4K window ID=%08x\r\n", Id);
-  }
+  Id = Ep[0];
+  Print (L"R404 > config: EP ID=%08x CLASS=%08x\r\n", Id, Ep[0x08 / 4]);
   if ((Id & 0xFFFFU) != 0x14E4U) goto Done;
   Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
   Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;

@@ -6144,7 +6144,8 @@ STATIC VOID R404WifiPcie (VOID) {
   Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 9)) | (1U << 1);
   Afi[0x168 / 4] = 0;
   V = Afi[0x0F8 / 4] & ~(0xFU << 20);
-  Afi[0x0F8 / 4] = (V | 0xEU | (1U << 20)) & ~(1U << 2);
+  // R404h: CLKREQ as Linux: all ports' CLKREQ_GPIO set, then cleared for port 1.
+  Afi[0x0F8 / 4] = (V | 0xEU | (1U << 20) | (7U << 29)) & ~((1U << 2) | (1U << 30));
   Afi[0x104 / 4] &= ~(1U << 2);
 
   // UPHY PLL P0: calibration, lock, register calibration (unless already locked).
@@ -6178,7 +6179,10 @@ STATIC VOID R404WifiPcie (VOID) {
   // PCIEXCLK out of reset, FPCI on, AFI interrupts off.
   R404_AT (L"FPCI");
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIEXCLK;
-  Afi[0x0AC / 4] |= 1U;
+  // R404h: CLKEN_OVERRIDE (bit 31) turns AFI dynamic clock gating off, as
+  // Linux does. Without it the first config read worked and the next one
+  // raised an SError (R404f/g).
+  Afi[0x0AC / 4] |= 1U | (1U << 31);
   Afi[0x0C8 / 4] = 0; Afi[0x0C4 / 4] = 0; Afi[0x0B4 / 4] = 0; Afi[0x0B0 / 4] = 0;
 
   // Translations: BAR0 config, BAR1 I/O, BAR2 prefetchable, BAR3 memory.
@@ -6198,6 +6202,23 @@ STATIC VOID R404WifiPcie (VOID) {
     Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
     if (Try == 0) {
       Rp[0xFA8 / 4] |= 1U << 7;
+      // R404h: Linux T210 root port features, ECTL (RX equalizer) values and fixups.
+      Rp[0xF48 / 4] |= 1U << 13;                                   // AER
+      Rp[0xF00 / 4] |= (1U << 27) | (1U << 28);                    // opportunistic ACK / UpdateFC
+      Rp[0xF4C / 4] |= 1U << 28;                                   // L1/L2 after DLLP done
+      Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~((0x7FU << 16) | (0x7FU << 24))) |
+                      (1U << 23) | (1U << 31) | (0xFU << 16) | (0xFU << 24);
+      Rp[0xE84 / 4] = (Rp[0xE84 / 4] & ~0xFFFFU) | 0x0FU;
+      Rp[0xE8C / 4] = (Rp[0xE8C / 4] & 0xFFFFU) | (0x67U << 16);
+      Rp[0xE90 / 4] = 0x55010000U;
+      Rp[0xE94 / 4] = 0x00000001U;
+      Rp[0xEA4 / 4] = (Rp[0xEA4 / 4] & ~0xFFFFU) | 0x8FU;
+      Rp[0xEAC / 4] = (Rp[0xEAC / 4] & 0xFFFFU) | (0xC7U << 16);
+      Rp[0xEB0 / 4] = 0x55010000U;
+      Rp[0xEB4 / 4] = 0x00000001U;
+      Rp[0xF44 / 4] = (Rp[0xF44 / 4] & ~(0xFU << 12)) | (0x9U << 12);   // deskew pulse width
+      Rp[0xF00 / 4] = (Rp[0xF00 / 4] & ~(0xFFU << 18)) | 0x01800000U;   // FC threshold
+      Rp[0x0B0 / 4] = (Rp[0x0B0 / 4] & ~0xFU) | 1U;                    // target speed Gen1
       Pads[0x0C8 / 4] = 0x90B890B8U;
       Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~0xFU) | 0xEU;
     }

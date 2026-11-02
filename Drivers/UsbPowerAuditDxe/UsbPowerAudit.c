@@ -6216,8 +6216,21 @@ STATIC VOID R404WifiPcie (VOID) {
   // R404e: the U-Boot 256 MB config window gave garbage (R404c: 01002080) and
   // then an SError (R404d). Use the Linux one: a 4 KiB AXI window at 0x11fff000
   // whose FPCI page is moved per access; bus 1 dev 0 regs 0-0xff are one page.
-  Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4]);
-  gBS->Stall (200000);
+  // R404f: R404e also took an SError on the first endpoint read 200 ms after
+  // the link came up, while R404c's read right after link-up did not fault.
+  // Read once at once, then watch the link for 300 ms, and read again only if
+  // the data link is still active.
+  {
+    UINT32 Lk[6], Vx[6];
+    UINT32 Id0 = Ep[0];
+    for (I = 0; I < 6; I++) { gBS->Stall (50000); Lk[I] = Rp[0x090 / 4]; Vx[I] = Rp[0xF00 / 4]; }
+    Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x EP ID now=%08x\r\n",
+           Rp[0], Rp[0x018 / 4], Rp[0x004 / 4], Id0);
+    Print (L"R404 > link 50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Lk[0], Lk[1], Lk[2], Lk[3], Lk[4], Lk[5]);
+    Print (L"R404 > XP   50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Vx[0], Vx[1], Vx[2], Vx[3], Vx[4], Vx[5]);
+    Lnk = Lk[5]; Xp = Vx[5]; Id = Id0;
+    if ((Lnk & (1U << 29)) == 0) { Stage = L"link dropped"; goto Done; }
+  }
   Id = Ep[0];
   Print (L"R404 > config: EP ID=%08x CLASS=%08x\r\n", Id, Ep[0x08 / 4]);
   if ((Id & 0xFFFFU) != 0x14E4U) goto Done;

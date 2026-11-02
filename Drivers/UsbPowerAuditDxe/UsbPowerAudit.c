@@ -6061,10 +6061,27 @@ STATIC UINT8 R404Ldo (UINT8 CfgReg, UINT8 FpsReg) {
 STATIC volatile UINT32 mR404SErrors;
 STATIC UINT64 mR404Esr, mR404Elr;
 
+// R404j: R404i stopped with no message: the faulting load is retried after the
+// handler returns. When the SError comes back at the same ELR, skip that
+// instruction (its result is then garbage, which the photo shows).
+STATIC UINT64 mR404LastElr;
+STATIC UINT32 mR404Repeat, mR404Skipped;
+
 STATIC VOID EFIAPI R404SError (IN EFI_EXCEPTION_TYPE Type, IN OUT EFI_SYSTEM_CONTEXT Context) {
+  UINT64 Elr = Context.SystemContextAArch64->ELR;
   if (mR404SErrors++ == 0) {
     mR404Esr = Context.SystemContextAArch64->ESR;
-    mR404Elr = Context.SystemContextAArch64->ELR;
+    mR404Elr = Elr;
+  }
+  if (Elr == mR404LastElr) {
+    if (++mR404Repeat >= 2) {
+      Context.SystemContextAArch64->ELR = Elr + 4;
+      mR404Repeat = 0;
+      mR404Skipped++;
+    }
+  } else {
+    mR404LastElr = Elr;
+    mR404Repeat = 0;
   }
 }
 
@@ -6265,17 +6282,19 @@ STATIC VOID R404WifiPcie (VOID) {
   {
     UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0, S[9];
     #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
+    #define R404_EP(N) Print (L"R404 > ep %u (SErrors %u)\r\n", (UINT32)(N), mR404SErrors)
     ZeroMem (S, sizeof (S));
-    Id = Ep[0];                                   R404_STEP (0);
-    Cls = Ep[0x08 / 4];                           R404_STEP (1);
-    Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0; R404_STEP (2);
-    Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0; R404_STEP (3);
-    Ep[0x04 / 4] = 0x2U;                          R404_STEP (4);   // memory space on
-    Ep[0x80 / 4] = 0x18000000U;                   R404_STEP (5);   // BAR0 window -> ChipCommon
-    Win = Ep[0x80 / 4];                           R404_STEP (6);
-    Cmd = Ep[0x04 / 4];                           R404_STEP (7);
-    if (mR404SErrors == 0) Chip = *(volatile UINT32 *)R404_EP_BAR0;
+    R404_EP (0); Id = Ep[0];                                   R404_STEP (0);
+    R404_EP (1); Cls = Ep[0x08 / 4];                           R404_STEP (1);
+    R404_EP (2); Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0; R404_STEP (2);
+    R404_EP (3); Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0; R404_STEP (3);
+    R404_EP (4); Ep[0x04 / 4] = 0x2U;                          R404_STEP (4);   // memory space on
+    R404_EP (5); Ep[0x80 / 4] = 0x18000000U;                   R404_STEP (5);   // BAR0 window -> ChipCommon
+    R404_EP (6); Win = Ep[0x80 / 4];                           R404_STEP (6);
+    R404_EP (7); Cmd = Ep[0x04 / 4];                           R404_STEP (7);
+    R404_EP (8); if (mR404SErrors == 0) Chip = *(volatile UINT32 *)R404_EP_BAR0;
     R404_STEP (8);
+    #undef R404_EP
     #undef R404_STEP
     for (I = 0; I < 6; I++) { gBS->Stall (50000); Lk[I] = Rp[0x090 / 4]; Vx[I] = Rp[0xF00 / 4]; }
     Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4]);
@@ -6296,7 +6315,8 @@ Done:
          Stage, Car[0x0E8 / 4], UphyWas, Pad[0x360 / 4], Xp, Lnk, Id, Chip);
   if ((Chip & 0xFFFFU) == 0x4356U)
     Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
-  Print (L"R404 wifi: SErrors caught %u (handler %s)\r\n", mR404SErrors, Cpu != NULL ? L"on" : L"MISSING");
+  Print (L"R404 wifi: SErrors caught %u, skipped %u (handler %s)\r\n", mR404SErrors, mR404Skipped,
+         Cpu != NULL ? L"on" : L"MISSING");
   gBS->Stall (8000000);   // time to take a photo of the R404 lines
   if (Cpu != NULL) Cpu->RegisterInterruptHandler (Cpu, EXCEPT_AARCH64_SERROR, NULL);
 }

@@ -37,9 +37,11 @@ EDK2 platform package, whose history is kept here). It adds:
 | Touch screen: multi-touch, press-and-hold | UEFI powers the FTM4 + `switchtouch.sys` |
 | Screen auto-rotation | UEFI R379 (SPI4/I2C2 clocks, DSDT SENS) + `switchsensor.sys` (LSM6DS3H) + tray app |
 | Bluetooth (keyboard, audio) | UEFI R390 (chip power, DSDT BTH0) + `switchbt.sys` + inbox BthMini. Bring your own `BCM4356A3.hcd` patch. Range is very short for now |
+| Audio: speakers and the 3.5 mm headphone jack (switches automatically when headphones are plugged in or out) | UEFI R402 (APE clocks, ADMA/ADMAIF/XBAR/I2S1, ALC5639 codec, DSDT AUD0) and R403 (headphone path, jack switch PV6) + `switchaudio.sys` 1.0.0.7 (PortCls WaveRT, 48 kHz 16-bit stereo) |
 | Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
-Not done: GPU acceleration (basic display only), audio (UEFI R400 plays a test tone through the speakers; no Windows driver yet), Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
+Not done: GPU acceleration (basic display only), Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
+Audio limits: the speakers and the headphones are one Windows output ("Speakers") and share one volume, so turn the volume down before plugging headphones in; the codec level is fixed (speakers -18 dB, headphones -24 dB); no microphone.
 
 ## Tested OS
 
@@ -55,7 +57,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 | `Firmware/` | Put the XUSB firmware here (not included; see its README). |
 | `patches/edk2/` | One fix for edk2 `XhciDxe`: allocate non-coherent DMA buffers write-combined. |
 | `patches/coreboot/` | Build fixes for [imbushuo/Coreboot](https://github.com/imbushuo/Coreboot) with current toolchains. |
-| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R392.sh` (audio bring-up: `package-R401.sh`). |
+| `Tools/uefi/package-R3xx.sh` | The scripts the tested images were built with (paths are those of the original setup). Current: `package-R403.sh`. |
 | `Tools/rcm-mac/` | Sending the payload from macOS with shofel2. |
 | `windows/` | Setup helpers: the login fix and the driver inventory script. The drivers themselves are in [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers). |
 | `docs/ja/uefi-revisions/` | Per-revision notes and hardware results for the UEFI test images (Japanese). |
@@ -67,7 +69,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 3. Build `NintendoSwitchPkg/NintendoSwitch.dsc` for AARCH64 with GCC5.
 4. Wrap `TEGRA210_EFI.fd` as an ELF payload and add it to a coreboot ROM built from
    imbushuo/Coreboot (with `patches/coreboot`), as `fallback/payload`.
-   - `Tools/uefi/package-R392.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
+   - `Tools/uefi/package-R403.sh` shows the exact commands: `objcopy` + `FvWrapper.ld` + `cbfstool`.
 5. Put the XUSB (USB host) firmware at the root of the SD card's ESP as `tegra21x_xusb_firmware`
    (see `Firmware/README.md`). The UEFI reads it from there at every boot; without it USB does not work.
    For a private build you can embed it instead with `-D EMBED_XUSB_FIRMWARE=TRUE`.
@@ -76,9 +78,10 @@ Bring your own Windows image and license. This repository does not contain Windo
 
 ## Which UEFI revision
 
-Use R392 (notes: `docs/ja/uefi-revisions/R392-README-ja.md`). It is R390 with the XUSB firmware read from the ESP and the Bluetooth UART clock reset at every boot. Do not use R391: its UART clock setting is wrong.
+Use R403 (notes: `docs/ja/uefi-revisions/R403-README-ja.md`). It is R392 plus audio: the speakers (R402) and the headphones (R403) for `switchaudio.sys`. Tested on the console on 2026-11-02.
 
-R393–R401 are the audio bring-up (notes: `docs/ja/uefi-revisions/R401-README-ja.md`). R400 played a test tone at boot; R401 turns that tone off by default. R401 has not been tested on the console yet.
+- R392 (notes: `docs/ja/uefi-revisions/R392-README-ja.md`) is R390 with the XUSB firmware read from the ESP and the Bluetooth UART clock reset at every boot. Everything after it builds on it. Do not use R391: its UART clock setting is wrong.
+- R393–R401 are the audio bring-up (notes: `docs/ja/uefi-revisions/R401-README-ja.md`). R400 played a test tone at boot; R401 turns that tone off by default.
 
 ## No prebuilt ROM
 
@@ -91,7 +94,7 @@ Built ROMs (coreboot + UEFI) are not published; build your own as above.
 The drivers, their install kits and the control center (SwitchCenter) are in
 [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers).
 Download the release ZIPs there and follow its README (test signing, then GPIO, I2C,
-battery, fan, touch, power button, CPU clock, RTC, sensors and Bluetooth). The control center can then
+battery, fan, touch, power button, CPU clock, RTC, sensors, Bluetooth and audio). The control center can then
 update the drivers over the air.
 
 ## Credits

@@ -6012,7 +6012,7 @@ STATIC VOID R388PrintXusbState (VOID) {
 #define R404_CAR_CLK_U       0x018
 #define R404_CAR_RST_U_SET   0x310
 #define R404_CAR_RST_U_CLR   0x314
-#define R404_CAR_CLK_U_SET   0x328
+#define R404_CAR_CLK_U_SET   0x330         // R404b wrote 0x328 (CLK_ENB_H_SET): AFI clock stayed off, hang
 #define R404_U_PCIE          (1U << 6)
 #define R404_U_AFI           (1U << 8)
 #define R404_U_PCIEXCLK      (1U << 10)

@@ -6228,7 +6228,10 @@ STATIC VOID R404WifiPcie (VOID) {
   // Linux does. Without it the first config read worked and the next one
   // raised an SError (R404f/g).
   Afi[0x0AC / 4] |= 1U | (1U << 31);
-  Afi[0x0C8 / 4] = 0; Afi[0x0C4 / 4] = 0; Afi[0x0B4 / 4] = 0; Afi[0x0B0 / 4] = 0;
+  // R404o: AFI error reporting as Linux (the GIC line stays off in UEFI; the
+  // code is read and cleared by hand before each endpoint access).
+  Afi[0x0C8 / 4] = 0x13FU; Afi[0x0C4 / 4] = 0xFFFFFFFFU; Afi[0x0B4 / 4] = 1U; Afi[0x0B0 / 4] = 0;
+  Afi[0x0B8 / 4] = 0;
 
   // Translations: BAR0 config, BAR1 I/O, BAR2 prefetchable, BAR3 memory.
   Afi[0x018 / 4] = (UINT32)R404_CS;    Afi[0x000 / 4] = (UINT32)(R404_CS_SIZE >> 12); Afi[0x030 / 4] = R404_CS_FPCI;
@@ -6296,8 +6299,9 @@ STATIC VOID R404WifiPcie (VOID) {
     #define R404_STEP(N) do { ArmDataSynchronizationBarrier (); gBS->Stall (20); S[N] = mR404SErrors; } while (0)
     // R404k: R404j read ep 0 and then hung on ep 1 (no SError). Linux writes
     // AFI_FPCI_BAR0 before every config access; do the same.
-    #define R404_EP(N) do { Print (L"R404 > ep %u (SErrors %u) PLLE_MISC=%08x UPHY=%08x LNK=%08x\r\n", (UINT32)(N), \
-      mR404SErrors, Car[0x0EC / 4], Pad[0x360 / 4], Rp[0x090 / 4]); \
+    #define R404_EP(N) do { Print (L"R404 > ep %u (SErr %u) LNK=%08x AFI code=%x sig=%08x upper=%02x\r\n", (UINT32)(N), \
+      mR404SErrors, Rp[0x090 / 4], Afi[0x0B8 / 4], Afi[0x0BC / 4], Afi[0x0C0 / 4] & 0xFFU); \
+      Afi[0x0B8 / 4] = 0; \
       Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4]; ArmDataSynchronizationBarrier (); } while (0)
     // R404m: R404l kept PLLE/UPHY locked and the link up, yet ep 1 hung. Guess:
     // after the first access the BCM4356 answers with CRS (retry) and the root

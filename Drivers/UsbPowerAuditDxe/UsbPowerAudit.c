@@ -6027,6 +6027,9 @@ STATIC VOID R388PrintXusbState (VOID) {
 #define PINMUX_WIFI_EN_PH0       0x1B4U
 #define PINMUX_WIFI_RST_PH1      0x1B8U
 #define GPIO_PA_OFFSET       0x000U
+// R404b: one line before each stage, so a hang shows where it happened.
+#define R404_AT(S) do { Stage = (S); Print (L"R404 > %s  PG=%08x CLAMP=%08x RST_U=%08x CLK_U=%08x\r\n", Stage, \
+  Pmc[0x038 / 4], Pmc[0x02C / 4], Car[R404_CAR_RST_U / 4], Car[R404_CAR_CLK_U / 4]); } while (0)
 
 STATIC UINT32 R404Wait (volatile UINT32 *Reg, UINT32 Mask, UINT32 Want, UINTN Ms) {
   UINTN I;
@@ -6072,7 +6075,7 @@ STATIC VOID R404WifiPcie (VOID) {
   if ((Ldo1 >> 6) != 3 || (Ldo7 >> 6) != 3) goto Done;
 
   // Wi-Fi power as Linux leaves it: WIFI_EN PH0 low, WIFI_RST PH1 high.
-  Stage = L"pins";
+  R404_AT (L"pins");
   Pin[PINMUX_WIFI_EN_PH0 / 4] = (Pin[PINMUX_WIFI_EN_PH0 / 4] & ~0x7FU) | (1U << 2);
   Pin[PINMUX_WIFI_RST_PH1 / 4] = (Pin[PINMUX_WIFI_RST_PH1 / 4] & ~0x7FU) | (1U << 2);
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 0, FALSE);
@@ -6091,20 +6094,24 @@ STATIC VOID R404WifiPcie (VOID) {
   gBS->Stall (150000);
 
   // PCIE partition with its clock and reset, then AFI, then the CML clock.
-  Stage = L"partition";
+  R404_AT (L"partition");
   Car[R404_CAR_RST_U_SET / 4] = R404_U_PCIEXCLK | R404_U_AFI | R404_U_PCIE;
   if (!SetPowerPartition (R404_PG_PCIE, TRUE)) goto Done;
   Car[R404_CAR_CLK_U_SET / 4] = R404_U_PCIE;
   gBS->Stall (10);
   Pmc[0x034 / 4] = 1U << R404_PG_VDEC;
   gBS->Stall (10);
+  if ((Pmc[0x02C / 4] & (1U << R404_PG_PCIE)) != 0) { Pmc[0x034 / 4] = 1U << R404_PG_PCIE; gBS->Stall (10); }
+  if ((Pmc[0x02C / 4] & (1U << R404_PG_PCIE)) != 0) goto Done;
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIE;
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_AFI;
   Car[R404_CAR_CLK_U_SET / 4] = R404_U_AFI;
   Car[0x48C / 4] = (Car[0x48C / 4] | 1U) & ~2U;
+  R404_AT (L"AFI read");
+  V = Afi[0x0F8 / 4];
 
   // PLLE 100 MHz (TRM cold boot sequence), unless XUSB already runs it.
-  Stage = L"PLLE";
+  R404_AT (L"PLLE");
   PlleWas = Car[0x0E8 / 4];
   if ((PlleWas & (1U << 31)) == 0) {
     Car[0x48C / 4] &= ~(1U << 28);
@@ -6124,7 +6131,7 @@ STATIC VOID R404WifiPcie (VOID) {
   }
 
   // PADCTL: clamps off, UPHY out of reset, lane pcie-0 = pcie-x1 with IDDQ disabled.
-  Stage = L"padctl";
+  R404_AT (L"padctl");
   Pad[0x024 / 4] &= ~(1U << 29); gBS->Stall (100);
   Pad[0x024 / 4] &= ~(1U << 30); gBS->Stall (100);
   Pad[0x024 / 4] &= ~(1U << 31);
@@ -6132,7 +6139,7 @@ STATIC VOID R404WifiPcie (VOID) {
   Pad[0x028 / 4] = (Pad[0x028 / 4] & ~(3U << 12)) | (1U << 1);
 
   // Controller: PLLE under pad control, x4/x1 crossbar with only port 1 on, gen2.
-  Stage = L"controller";
+  R404_AT (L"controller");
   Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 9)) | (1U << 1);
   Afi[0x168 / 4] = 0;
   V = Afi[0x0F8 / 4] & ~(0xFU << 20);
@@ -6140,7 +6147,7 @@ STATIC VOID R404WifiPcie (VOID) {
   Afi[0x104 / 4] &= ~(1U << 2);
 
   // UPHY PLL P0: calibration, lock, register calibration (unless already locked).
-  Stage = L"UPHY PLL";
+  R404_AT (L"UPHY PLL");
   UphyWas = Pad[0x360 / 4];
   if ((UphyWas & (1U << 15)) == 0) {
     Pad[0x364 / 4] = (Pad[0x364 / 4] & ~(0xFFFFFFU << 4)) | (0x136U << 4);
@@ -6168,7 +6175,7 @@ STATIC VOID R404WifiPcie (VOID) {
   }
 
   // PCIEXCLK out of reset, FPCI on, AFI interrupts off.
-  Stage = L"FPCI";
+  R404_AT (L"FPCI");
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIEXCLK;
   Afi[0x0AC / 4] |= 1U;
   Afi[0x0C8 / 4] = 0; Afi[0x0C4 / 4] = 0; Afi[0x0B4 / 4] = 0; Afi[0x0B0 / 4] = 0;
@@ -6184,7 +6191,7 @@ STATIC VOID R404WifiPcie (VOID) {
   Afi[0x064 / 4] = 0; Afi[0x060 / 4] = 0; Afi[0x068 / 4] = 0;
 
   // Port 1: reference clock, PERST# pulse, PCA, refclk drive, then wait for the link.
-  Stage = L"link";
+  R404_AT (L"link");
   Afi[0x118 / 4] |= (1U << 3) | (1U << 1) | (1U << 4);
   for (Try = 0; Try < 3; Try++) {
     Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
@@ -6201,7 +6208,7 @@ STATIC VOID R404WifiPcie (VOID) {
   if ((Lnk & (1U << 29)) == 0) goto Done;
 
   // Root port: bus 0 -> 1, memory window, memory + bus master. Endpoint: BARs, memory.
-  Stage = L"config";
+  R404_AT (L"config");
   Rp[0x018 / 4] = (Rp[0x018 / 4] & 0xFF000000U) | 0x00010100U;
   Rp[0x020 / 4] = ((UINT32)(R404_MEM_END >> 16) & 0xFFF0U) << 16 | (((UINT32)R404_EP_BAR2 >> 16) & 0xFFF0U);
   Rp[0x004 / 4] = (Rp[0x004 / 4] & 0xFFFF0000U) | 0x6U;
@@ -6220,7 +6227,7 @@ Done:
          Stage, Car[0x0E8 / 4], UphyWas, Pad[0x360 / 4], Xp, Lnk, Id, Chip);
   if ((Chip & 0xFFFFU) == 0x4356U)
     Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
-  gBS->Stall (5000000);   // time to take a photo of the R404 lines
+  gBS->Stall (8000000);   // time to take a photo of the R404 lines
 }
 
 // RunTest, then the Wi-Fi PCIe probe (after XUSB has taken PLLE).

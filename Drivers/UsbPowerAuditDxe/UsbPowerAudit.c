@@ -6110,11 +6110,19 @@ STATIC VOID R404WifiPcie (VOID) {
   Print (L"R404 wifi: LDO1(pex)=%02x LDO7(plle)=%02x\r\n", Ldo1, Ldo7);
   if ((Ldo1 >> 6) != 3 || (Ldo7 >> 6) != 3) goto Done;
 
-  // Wi-Fi power as Linux leaves it: WIFI_EN PH0 low, WIFI_RST PH1 high.
+  // Wi-Fi power: WIFI_RST PH1 high. R404n: WIFI_EN PH0 high too. Up to R404m it
+  // was low as in the Linux boot-time hog, and the chip answered one config read
+  // only (PCIe core up, Wi-Fi core apparently off).
   R404_AT (L"pins");
+  Print (L"R404 > PH before: pinmux EN=%08x RST=%08x CNF=%02x OE=%02x OUT=%02x IN=%02x\r\n",
+         Pin[PINMUX_WIFI_EN_PH0 / 4], Pin[PINMUX_WIFI_RST_PH1 / 4],
+         *(volatile UINT32 *)(GPIO_BASE + GPIO_PH_OFFSET + GPIO_CNF) & 0xFFU,
+         *(volatile UINT32 *)(GPIO_BASE + GPIO_PH_OFFSET + GPIO_OE) & 0xFFU,
+         *(volatile UINT32 *)(GPIO_BASE + GPIO_PH_OFFSET + GPIO_OUT) & 0xFFU,
+         *(volatile UINT32 *)(GPIO_BASE + GPIO_PH_OFFSET + GPIO_IN) & 0xFFU);
   Pin[PINMUX_WIFI_EN_PH0 / 4] = (Pin[PINMUX_WIFI_EN_PH0 / 4] & ~0x7FU) | (1U << 2);
   Pin[PINMUX_WIFI_RST_PH1 / 4] = (Pin[PINMUX_WIFI_RST_PH1 / 4] & ~0x7FU) | (1U << 2);
-  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 0, FALSE);
+  R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 0, TRUE);
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OUT, 1, TRUE);
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 0, TRUE);
   R366GpioSet (GPIO_PH_OFFSET, GPIO_OE, 1, TRUE);
@@ -6306,16 +6314,10 @@ STATIC VOID R404WifiPcie (VOID) {
         RootCaps = Rp[(Cap + 0x1C) / 4];
         Rp[(Cap + 0x1C) / 4] = (RootCaps & 0xFFFFU) | (1U << 4);    // Root Control: CRSSVE
       }
-      ZeroMem (Seen, sizeof (Seen));
-      for (Ms = 0; Ms < 5000; Ms++) {
-        Afi[0x030 / 4] = R404_CS_FPCI; (VOID)Afi[0x030 / 4];
-        V0 = Ep[0];
-        if (NSeen == 0 || (Seen[NSeen - 1] != V0 && NSeen < 6)) Seen[NSeen++] = V0;
-        if (Ms > 0 && (V0 & 0xFFFFU) == 0x14E4U) break;
-        gBS->Stall (1000);
-      }
-      Print (L"R404 > CRS: cap=%02x rootcaps/ctl=%08x->%08x vendor reads %08x %08x %08x %08x after %u ms\r\n",
-             Cap, RootCaps, Cap < 0x100U ? Rp[(Cap + 0x1C) / 4] : 0, Seen[0], Seen[1], Seen[2], Seen[3], Ms);
+      // R404n: the 5 s vendor ID poll (R404m) hung on its second read; dropped.
+      (VOID)Seen; (VOID)NSeen; (VOID)Ms;
+      Print (L"R404 > CRS SV: cap=%02x rootcaps/ctl=%08x->%08x\r\n",
+             Cap, RootCaps, Cap < 0x100U ? Rp[(Cap + 0x1C) / 4] : 0);
     }
     ZeroMem (S, sizeof (S));
     R404_EP (0); Id = Ep[0];                                   R404_STEP (0);

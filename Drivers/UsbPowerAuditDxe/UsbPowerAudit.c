@@ -6061,7 +6061,7 @@ STATIC VOID R404WifiPcie (VOID) {
   volatile UINT32 *Rp = (volatile UINT32 *)R404_RP1;
   volatile UINT32 *Ep = (volatile UINT32 *)(R404_CS + (1UL << 16));   // bus 1, dev 0, fn 0
   UINT8 Ldo1, Ldo7;
-  UINT32 V, PlleWas, UphyWas, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
+  UINT32 V, PlleWas, UphyWas = 0, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
   CONST CHAR16 *Stage = L"rails";
   UINTN I, Try;
 
@@ -6220,6 +6220,7 @@ Done:
          Stage, Car[0x0E8 / 4], UphyWas, Pad[0x360 / 4], Xp, Lnk, Id, Chip);
   if ((Chip & 0xFFFFU) == 0x4356U)
     Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
+  gBS->Stall (5000000);   // time to take a photo of the R404 lines
 }
 
 // RunTest, then the Wi-Fi PCIe probe (after XUSB has taken PLLE).

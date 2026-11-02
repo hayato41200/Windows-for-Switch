@@ -6216,30 +6216,31 @@ STATIC VOID R404WifiPcie (VOID) {
   // R404e: the U-Boot 256 MB config window gave garbage (R404c: 01002080) and
   // then an SError (R404d). Use the Linux one: a 4 KiB AXI window at 0x11fff000
   // whose FPCI page is moved per access; bus 1 dev 0 regs 0-0xff are one page.
-  // R404f: R404e also took an SError on the first endpoint read 200 ms after
-  // the link came up, while R404c's read right after link-up did not fault.
-  // Read once at once, then watch the link for 300 ms, and read again only if
-  // the data link is still active.
+  // R404g: R404f read 43EC14E4 (BCM4356 Wi-Fi) right after link-up, the link
+  // stayed up for 300 ms, but an endpoint read 300 ms later never came back
+  // (R404d/e: SError). So do all the endpoint setup at once after link-up,
+  // and after that only look at root port registers.
   {
-    UINT32 Lk[6], Vx[6];
-    UINT32 Id0 = Ep[0];
+    UINT32 Lk[6], Vx[6], Cls = 0, Win = 0, Cmd = 0;
+    Id = Ep[0];
+    if ((Id & 0xFFFFU) == 0x14E4U) {
+      Cls = Ep[0x08 / 4];
+      Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
+      Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;
+      Ep[0x04 / 4] = (Ep[0x04 / 4] & 0xFFFF0000U) | 0x2U;
+      Ep[0x80 / 4] = 0x18000000U;               // BAR0 window -> ChipCommon
+      Win = Ep[0x80 / 4];
+      Cmd = Ep[0x04 / 4];
+      Chip = *(volatile UINT32 *)R404_EP_BAR0;
+    }
     for (I = 0; I < 6; I++) { gBS->Stall (50000); Lk[I] = Rp[0x090 / 4]; Vx[I] = Rp[0xF00 / 4]; }
-    Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x EP ID now=%08x\r\n",
-           Rp[0], Rp[0x018 / 4], Rp[0x004 / 4], Id0);
+    Print (L"R404 > config: RP ID=%08x BUS=%08x CMD=%08x\r\n", Rp[0], Rp[0x018 / 4], Rp[0x004 / 4]);
+    Print (L"R404 > EP ID=%08x CLASS=%08x CMD=%08x WIN=%08x CHIP=%08x\r\n", Id, Cls, Cmd, Win, Chip);
     Print (L"R404 > link 50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Lk[0], Lk[1], Lk[2], Lk[3], Lk[4], Lk[5]);
     Print (L"R404 > XP   50..300 ms: %08x %08x %08x %08x %08x %08x\r\n", Vx[0], Vx[1], Vx[2], Vx[3], Vx[4], Vx[5]);
-    Lnk = Lk[5]; Xp = Vx[5]; Id = Id0;
-    if ((Lnk & (1U << 29)) == 0) { Stage = L"link dropped"; goto Done; }
+    Lnk = Lk[5]; Xp = Vx[5];
   }
-  Id = Ep[0];
-  Print (L"R404 > config: EP ID=%08x CLASS=%08x\r\n", Id, Ep[0x08 / 4]);
   if ((Id & 0xFFFFU) != 0x14E4U) goto Done;
-  Ep[0x10 / 4] = (UINT32)R404_EP_BAR0; Ep[0x14 / 4] = 0;
-  Ep[0x18 / 4] = (UINT32)R404_EP_BAR2; Ep[0x1C / 4] = 0;
-  Ep[0x04 / 4] = (Ep[0x04 / 4] & 0xFFFF0000U) | 0x2U;
-  Ep[0x80 / 4] = 0x18000000U;                 // BAR0 window -> ChipCommon
-  for (I = 0; I < 10 && Ep[0x80 / 4] != 0x18000000U; I++) gBS->Stall (100);
-  Chip = *(volatile UINT32 *)R404_EP_BAR0;
   Stage = L"done";
 
 Done:

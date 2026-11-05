@@ -6151,6 +6151,14 @@ STATIC VOID R404WifiPcie (VOID) {
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_AFI;
   Car[R404_CAR_CLK_U_SET / 4] = R404_U_AFI;
   Car[0x48C / 4] = (Car[0x48C / 4] | 1U) & ~2U;
+  // R404q: PCIERX0-5 (CLK_ENB_W bits 2-7). Hekate turns them on and Linux has no
+  // clock for them, so L4T runs with what Hekate left. R404p: no error logged
+  // anywhere, link up, and the second endpoint access never came back.
+  V = Car[0x364 / 4];
+  Car[0x448 / 4] = 0xFCU;
+  (VOID)Car[0x364 / 4];
+  gBS->Stall (10);
+  Print (L"R404 > CLK_W=%08x->%08x RST_W=%08x CLK_V=%08x\r\n", V, Car[0x364 / 4], Car[0x35C / 4], Car[0x360 / 4]);
   R404_AT (L"AFI read");
   V = Afi[0x0F8 / 4];
 

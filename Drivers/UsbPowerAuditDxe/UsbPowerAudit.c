@@ -6003,7 +6003,9 @@ STATIC VOID R388PrintXusbState (VOID) {
 // the XUSB bring-up (which wants PLLE off at its start) and leaves the link up.
 #define R404_PADS            0x01003000UL
 #define R404_AFI             0x01003800UL
+#define R404_RP0             0x01000000UL  // port 0 root port registers (00:01.0, no device)
 #define R404_RP1             0x01001000UL  // port 1 root port registers (00:02.0)
+#define R404_MSELECT         0x50060000UL
 #define R404_CS              0x11FFF000UL  // 4 KiB config window, as Linux ("cs")
 #define R404_CS_SIZE         0x1000UL
 #define R404_CS_FPCI         (0xFE100000U + ((1U << 16) >> 8))   // page of bus 1, dev 0, fn 0
@@ -6085,6 +6087,47 @@ STATIC VOID EFIAPI R404SError (IN EFI_EXCEPTION_TYPE Type, IN OUT EFI_SYSTEM_CON
   }
 }
 
+// R404r: root port setup of the L4T 4.9 driver (tegra_pcie_enable_rp_features and
+// tegra_pcie_apply_sw_war, T210, clk_m 19.2 MHz), the driver this console's Wi-Fi
+// is known to work with. Up to R404q this followed mainline Linux, which leaves
+// out the timers.
+STATIC VOID R404RpFeatures (volatile UINT32 *Rp) {
+  // prod_c_rp from the console's device tree.
+  Rp[0xE84 / 4] = (Rp[0xE84 / 4] & ~0xFFFFU) | 0x0FU;
+  Rp[0xEA4 / 4] = (Rp[0xEA4 / 4] & ~0xFFFFU) | 0x8FU;
+  Rp[0xE90 / 4] = 0x55010000U;
+  Rp[0xE94 / 4] = 0x00000001U;
+  Rp[0xEB0 / 4] = 0x55010000U;
+  Rp[0xEB4 / 4] = 0x00000001U;
+  Rp[0xE8C / 4] = (Rp[0xE8C / 4] & 0xFFFFU) | (0x67U << 16);
+  Rp[0xEAC / 4] = (Rp[0xEAC / 4] & 0xFFFFU) | (0xC7U << 16);
+  Rp[0xF00 / 4] |= (1U << 27) | (1U << 28);                    // opportunistic ACK / UpdateFC
+  Rp[0xFE0 / 4] |= (1U << 23) | (1U << 31) | (0xFU << 16) | (0xFU << 24);   // clock clamps
+  Rp[0xF04 / 4] |= 1U << 21;                                   // L1 ASPM support
+  Rp[0xF4C / 4] |= 1U << 28;                                   // L1/L2 after DLLP done
+  Rp[0xF48 / 4] |= 1U << 13;                                   // AER
+  Rp[0xC00 / 4] = (Rp[0xC00 / 4] & ~(0xFFU << 8)) | (0x1EU << 8);
+  Rp[0xC00 / 4] = (Rp[0xC00 / 4] & ~((3U << 16) | (0x1FU << 19))) | (1U << 16) | (7U << 19);
+  // Software workarounds.
+  Rp[0x0B0 / 4] = (Rp[0x0B0 / 4] & ~0xFU) | 1U;                // target speed Gen1
+  Rp[0xC24 / 4] &= ~(3U << 16);                                // no LTR interrupts
+  Rp[0x03C / 4] |= 0xFFU;
+  Rp[0xF50 / 4] |= (1U << 2) | (1U << 1) | 1U | (1U << 15) | (3U << 5) | (3U << 3) | (3U << 16);
+  Rp[0xC04 / 4] = (Rp[0xC04 / 4] & ~(0x1FFU << 13)) | (0x27U << 13);
+  Rp[0xF44 / 4] = (Rp[0xF44 / 4] & ~(0xFU << 12)) | (0x9U << 12);   // deskew pulse width
+  Rp[0xF00 / 4] = (Rp[0xF00 / 4] & ~(0xFFU << 18)) | (0x60U << 18); // UpdateFC threshold
+  // Timers for a 19.2 MHz clk_m (the hardware defaults assume 25 MHz).
+  Rp[0xE24 / 4] = (Rp[0xE24 / 4] & ~(0xFFU | (0xFFFFU << 8) | (0xFFU << 24))) |
+                  0xAU | (0x180U << 8) | (0xAU << 24);
+  Rp[0xE28 / 4] = (Rp[0xE28 / 4] & ~((0xFFU << 16) | (0xFFU << 24))) | (0x10U << 16) | (0x74U << 24);
+  Rp[0xF30 / 4] = (Rp[0xF30 / 4] & ~(0xFFU | (0x1FFFFU << 14))) |
+                  0x14U | (1U << 8) | (1U << 13) | (0x1770U << 14);
+  Rp[0xC04 / 4] = (Rp[0xC04 / 4] & ~0x1FFFU) | 0x26U;
+  Rp[0xC08 / 4] = (Rp[0xC08 / 4] & ~(0x1FFFU | (0xFFU << 13) | (0xFU << 21))) |
+                  0x4DU | (0x13U << 13) | (0x2U << 21);
+  Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~0xFU) | 0xEU;              // endpoint present
+}
+
 STATIC VOID R404WifiPcie (VOID) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
@@ -6093,6 +6136,8 @@ STATIC VOID R404WifiPcie (VOID) {
   volatile UINT32 *Pads = (volatile UINT32 *)R404_PADS;
   volatile UINT32 *Afi = (volatile UINT32 *)R404_AFI;
   volatile UINT32 *Rp = (volatile UINT32 *)R404_RP1;
+  volatile UINT32 *Rp0 = (volatile UINT32 *)R404_RP0;
+  volatile UINT32 *Msel = (volatile UINT32 *)R404_MSELECT;
   volatile UINT32 *Ep = (volatile UINT32 *)R404_CS;   // bus 1, dev 0, fn 0 (R404_CS_FPCI)
   UINT8 Ldo1, Ldo7;
   UINT32 V, PlleWas, UphyWas = 0, Xp = 0, Lnk = 0, Id = 0xFFFFFFFFU, Chip = 0xFFFFFFFFU;
@@ -6151,14 +6196,7 @@ STATIC VOID R404WifiPcie (VOID) {
   Car[R404_CAR_RST_U_CLR / 4] = R404_U_AFI;
   Car[R404_CAR_CLK_U_SET / 4] = R404_U_AFI;
   Car[0x48C / 4] = (Car[0x48C / 4] | 1U) & ~2U;
-  // R404q: PCIERX0-5 (CLK_ENB_W bits 2-7). Hekate turns them on and Linux has no
-  // clock for them, so L4T runs with what Hekate left. R404p: no error logged
-  // anywhere, link up, and the second endpoint access never came back.
-  V = Car[0x364 / 4];
-  Car[0x448 / 4] = 0xFCU;
-  (VOID)Car[0x364 / 4];
-  gBS->Stall (10);
-  Print (L"R404 > CLK_W=%08x->%08x RST_W=%08x CLK_V=%08x\r\n", V, Car[0x364 / 4], Car[0x35C / 4], Car[0x360 / 4]);
+  // R404q: CLK_W already had PCIERX0-5 (bits 2-7) on, so they are not the cause.
   R404_AT (L"AFI read");
   V = Afi[0x0F8 / 4];
 
@@ -6192,13 +6230,20 @@ STATIC VOID R404WifiPcie (VOID) {
 
   // Controller: PLLE under pad control, x4/x1 crossbar with only port 1 on, gen2.
   R404_AT (L"controller");
+  // R404r: MSELECT as L4T (tegra_pcie_enable_wrap): wrap to incr on for PCIe, error
+  // response off.
+  V = *Msel;
+  *Msel = (V | (1U << 28)) & ~(1U << 24);
+  (VOID)*Msel;
+  Print (L"R404 > MSELECT=%08x->%08x src=%08x\r\n", V, *Msel, Car[0x3B4 / 4]);
   // R404l: PLLE stays on: bypass the pads-to-PLLE power-down (Linux allows it, but
   // also starts the PLLE hardware sequencer, which this code does not).
   Afi[0x160 / 4] = (Afi[0x160 / 4] & ~(1U << 1)) | (1U << 9);
   Afi[0x168 / 4] = 0;
   V = Afi[0x0F8 / 4] & ~(0xFU << 20);
   // R404h: CLKREQ as Linux: all ports' CLKREQ_GPIO set, then cleared for port 1.
-  Afi[0x0F8 / 4] = (V | 0xEU | (1U << 20) | (7U << 29)) & ~((1U << 2) | (1U << 30));
+  // R404r: both ports on while the link comes up, as L4T; port 0 goes off afterwards.
+  Afi[0x0F8 / 4] = (V | 0xEU | (1U << 20) | (7U << 29)) & ~((1U << 1) | (1U << 2) | (1U << 29) | (1U << 30));
   Afi[0x104 / 4] &= ~(1U << 2);
 
   // UPHY PLL P0: calibration, lock, register calibration (unless already locked).
@@ -6229,9 +6274,8 @@ STATIC VOID R404WifiPcie (VOID) {
     Pad[0x37C / 4] &= ~(1U << 13);
   }
 
-  // PCIEXCLK out of reset, FPCI on, AFI interrupts off.
+  // FPCI on, AFI interrupts off. R404r: PCIEXCLK stays in reset until the ports are set.
   R404_AT (L"FPCI");
-  Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIEXCLK;
   // R404h: CLKEN_OVERRIDE (bit 31) turns AFI dynamic clock gating off, as
   // Linux does. Without it the first config read worked and the next one
   // raised an SError (R404f/g).
@@ -6248,43 +6292,39 @@ STATIC VOID R404WifiPcie (VOID) {
   Afi[0x024 / 4] = 0x13000000U;        Afi[0x00C / 4] = 0x0D000000U >> 12;            Afi[0x03C / 4] = (0x13000U << 4) | 1U;
   Afi[0x028 / 4] = 0; Afi[0x010 / 4] = 0; Afi[0x040 / 4] = 0;
   Afi[0x02C / 4] = 0; Afi[0x014 / 4] = 0; Afi[0x044 / 4] = 0;
-  Afi[0x04C / 4] = 0x80000000U; Afi[0x048 / 4] = 0; Afi[0x054 / 4] = 0; Afi[0x050 / 4] = 0;
   Afi[0x064 / 4] = 0; Afi[0x060 / 4] = 0; Afi[0x068 / 4] = 0;
 
-  // Port 1: reference clock, PERST# pulse, PCA, refclk drive, then wait for the link.
+  // R404r: link bring-up in the order of L4T tegra_pcie_check_ports. The MBIST
+  // workaround (PCA_ENABLE) belongs on root port 0 even with nothing behind it, and
+  // only during this step; R404h-q had it on port 1, and port 0 was off. The port
+  // setup is done while PCIEXCLK is in reset; up to R404q the link was already
+  // training during it.
   R404_AT (L"link");
-  // R404k: no CLKREQ_EN (bit 1): keep the reference clock running. R404j: the
-  // endpoint answered one config read and then stopped answering.
-  Afi[0x118 / 4] = (Afi[0x118 / 4] & ~(1U << 1)) | (1U << 3) | (1U << 4);
-  for (Try = 0; Try < 3; Try++) {
-    Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
-    if (Try == 0) {
-      Rp[0xFA8 / 4] |= 1U << 7;
-      // R404h: Linux T210 root port features, ECTL (RX equalizer) values and fixups.
-      Rp[0xF48 / 4] |= 1U << 13;                                   // AER
-      Rp[0xF00 / 4] |= (1U << 27) | (1U << 28);                    // opportunistic ACK / UpdateFC
-      Rp[0xF4C / 4] |= 1U << 28;                                   // L1/L2 after DLLP done
-      Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~((0x7FU << 16) | (0x7FU << 24))) |
-                      (1U << 23) | (1U << 31) | (0xFU << 16) | (0xFU << 24);
-      Rp[0xE84 / 4] = (Rp[0xE84 / 4] & ~0xFFFFU) | 0x0FU;
-      Rp[0xE8C / 4] = (Rp[0xE8C / 4] & 0xFFFFU) | (0x67U << 16);
-      Rp[0xE90 / 4] = 0x55010000U;
-      Rp[0xE94 / 4] = 0x00000001U;
-      Rp[0xEA4 / 4] = (Rp[0xEA4 / 4] & ~0xFFFFU) | 0x8FU;
-      Rp[0xEAC / 4] = (Rp[0xEAC / 4] & 0xFFFFU) | (0xC7U << 16);
-      Rp[0xEB0 / 4] = 0x55010000U;
-      Rp[0xEB4 / 4] = 0x00000001U;
-      Rp[0xF44 / 4] = (Rp[0xF44 / 4] & ~(0xFU << 12)) | (0x9U << 12);   // deskew pulse width
-      Rp[0xF00 / 4] = (Rp[0xF00 / 4] & ~(0xFFU << 18)) | 0x01800000U;   // FC threshold
-      Rp[0x0B0 / 4] = (Rp[0x0B0 / 4] & ~0xFU) | 1U;                    // target speed Gen1
-      Pads[0x0C8 / 4] = 0x90B890B8U;
-      Rp[0xFE0 / 4] = (Rp[0xFE0 / 4] & ~0xFU) | 0xEU;
-    }
-    Xp = R404Wait (&Rp[0xF00 / 4], 1U << 30, 1U << 30, 400);
-    if ((Xp & (1U << 30)) == 0) continue;
-    Lnk = R404Wait (&Rp[0x090 / 4], 1U << 29, 1U << 29, 400);
-    if ((Lnk & (1U << 29)) != 0) break;
+  Pads[0x0C8 / 4] = 0x90B890B8U;
+  Rp0[0xFA8 / 4] |= 1U << 7;
+  for (I = 0; I < 2; I++) {
+    UINT32 Ctl = I == 0 ? 0x110U : 0x118U;
+    // No CLKREQ_EN (bit 1): L4T clears it when the DT has no disable-clock-request.
+    Afi[Ctl / 4] = (Afi[Ctl / 4] & ~(1U << 1)) | (1U << 3) | (1U << 4);
+    Afi[Ctl / 4] &= ~1U; gBS->Stall (2000); Afi[Ctl / 4] |= 1U;
+    R404RpFeatures (I == 0 ? Rp0 : Rp);
+    Print (L"R404 > port %u set: CTL=%08x XP=%08x\r\n", (UINT32)I, Afi[Ctl / 4], (I == 0 ? Rp0 : Rp)[0xF00 / 4]);
   }
+  gBS->Stall (100);
+  Car[R404_CAR_RST_U_CLR / 4] = R404_U_PCIEXCLK;
+  gBS->Stall (20000);
+  R404_AT (L"wait link");
+  for (Try = 0; Try < 3; Try++) {
+    Xp = R404Wait (&Rp[0xF00 / 4], 1U << 30, 1U << 30, 400);
+    if ((Xp & (1U << 30)) != 0) {
+      Lnk = R404Wait (&Rp[0x090 / 4], 1U << 29, 1U << 29, 400);
+      if ((Lnk & (1U << 29)) != 0) break;
+    }
+    Afi[0x118 / 4] &= ~1U; gBS->Stall (2000); Afi[0x118 / 4] |= 1U;
+  }
+  // Port 0 has no device (sw-link-disable in the DT): off again, workaround off.
+  Afi[0x0F8 / 4] |= (1U << 1) | (1U << 29);
+  Rp0[0xFA8 / 4] &= ~(1U << 7);
   if ((Lnk & (1U << 29)) == 0) goto Done;
 
   // Root port: bus 0 -> 1, memory window, memory + bus master. Endpoint: BARs, memory.

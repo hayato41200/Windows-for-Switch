@@ -4738,7 +4738,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R404 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe probe + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R405 (ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -6416,7 +6416,7 @@ Done:
     Print (L"R404 wifi: BCM4356 rev %u found on PCIe.\r\n", (Chip >> 16) & 0xFU);
   Print (L"R404 wifi: SErrors caught %u, skipped %u (handler %s)\r\n", mR404SErrors, mR404Skipped,
          Cpu != NULL ? L"on" : L"MISSING");
-  gBS->Stall (8000000);   // time to take a photo of the R404 lines
+  gBS->Stall (3000000);   // R405: 3 s (was 8 s) to see the R404 lines; R404r works
   if (Cpu != NULL) Cpu->RegisterInterruptHandler (Cpu, EXCEPT_AARCH64_SERROR, NULL);
 }
 

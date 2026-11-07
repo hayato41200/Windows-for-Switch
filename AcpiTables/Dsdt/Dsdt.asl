@@ -412,6 +412,30 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R405: Wi-Fi for switchwifi.sys (ACPI\SWOA0D01). BCM4356 on Tegra210
+        // PCIe port 1. pci.sys cannot enumerate this controller (no ECAM), so
+        // UEFI brings the link up, assigns the BARs and enables memory space;
+        // the driver gets the BARs, the bus 1 config window, root port 1 and
+        // the AFI directly. Order matters (the driver takes them by position).
+        Device (WLN0)
+        {
+            Name (_HID, "SWOA0D01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x13400000, 0x00008000)   // BAR0
+                Memory32Fixed (ReadWrite, 0x13000000, 0x00400000)   // BAR2
+                Memory32Fixed (ReadWrite, 0x11FFF000, 0x00001000)   // config, bus 1
+                Memory32Fixed (ReadWrite, 0x01001000, 0x00001000)   // root port 1
+                Memory32Fixed (ReadWrite, 0x01003800, 0x00000800)   // AFI
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
         // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
         // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
         Device (PWRB)

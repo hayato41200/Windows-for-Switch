@@ -436,6 +436,28 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R408: built-in panel for switchdisplay.sys (ACPI\SWOA0E01), a WDDM
+        // display-only driver. coreboot sets up DSI-A and DC-A window A on the
+        // GOP framebuffer (0xDFB80000, UEFI "Display Reserved"). The
+        // framebuffer is NOT a resource here: R407 listed it first and Windows
+        // then did not boot (noise on the panel) even without the driver. DC-A
+        // and DSI-A are for the later display power-off; no interrupt yet.
+        Device (DISP)
+        {
+            Name (_HID, "SWOA0E01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x54200000, 0x00040000)   // DC-A
+                Memory32Fixed (ReadWrite, 0x54300000, 0x00040000)   // DSI-A
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
         // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
         // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
         Device (PWRB)

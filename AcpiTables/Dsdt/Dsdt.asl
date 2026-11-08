@@ -441,7 +441,10 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
         // GOP framebuffer (0xDFB80000, UEFI "Display Reserved"). The
         // framebuffer is NOT a resource here: R407 listed it first and Windows
         // then did not boot (noise on the panel) even without the driver. DC-A
-        // and DSI-A are for the later display power-off; no interrupt yet.
+        // and DSI-A are for the display power-off (screen off). No interrupt:
+        // R409 added the DC-A interrupt (GSIV 105) and Windows then stopped
+        // the display-only adapter right after start (problem 43, status
+        // 0xC00000E5) whatever the driver did, so vsync stays timer-paced.
         Device (DISP)
         {
             Name (_HID, "SWOA0E01")

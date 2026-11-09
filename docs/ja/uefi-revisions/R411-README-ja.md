@@ -21,3 +21,4 @@ ROM: `coreboot-R411.rom`。作り方は `Tools/uefi/package-R411.sh`。
 - PowerTest 成功: **NV_PMC_BOOT_0 = 0x12B000A1(GM20B、rev A1)**、PTIMER が 1 ms で約 100 万進む(動いている)、PMC_ENABLE 0xC0012020。かかった時間 102 ms。
 - GPU から見える WPR: 0xFEB00000 から 0xFEB40000 まで(256 KB、coreboot の GSC2 と同じ)。
 - 止めたあとは元どおり(クランプ 1、リセット 1、GPIO6 入力、VOUT の EN オフ)。
+- 電源ボタン: R411 でもいつもどおり動く(押して画面オフ、長押し)。0x3C を Shared にしても問題なし。

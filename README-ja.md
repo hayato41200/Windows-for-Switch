@@ -34,12 +34,12 @@ English: [README.md](README.md)
 | タッチパネル（マルチタッチ、長押し） | UEFI が FTM4 の電源を入れる + `switchtouch.sys` |
 | 画面の自動回転 | UEFI R379（SPI4 と I2C2 のクロック、DSDT の SENS）+ `switchsensor.sys`（LSM6DS3H）+ 常駐アプリ。明るさセンサーは、この本体では見つからない |
 | Bluetooth（キーボード、オーディオ） | UEFI R390（チップの電源、DSDT の BTH0）+ `switchbt.sys` + Windows 標準の BthMini。ファームウェアのパッチ `BCM4356A3.hcd` は各自で用意する。電波は機器にかなり近づけないと届かない |
+| Wi-Fi（ベータ）: WPA2-Personalで接続、DHCP、インターネット接続。Wi-Fi 5（802.11ac）、866/866 Mbit/s | UEFI R404/R405（PCIe port 1、BCM4356、DSDT WLN0）+ `switchwlan.sys` 0.6.13（ベータ）。ファームウェア `brcmfmac4356(A3)-pcie.bin/.txt` は各自で用意（動作確認済み 7.35.252.108）。2026-11-08に実機確認：fast.com 下り55 Mbit/s・上り39 Mbit/s |
 | 音声: スピーカーと 3.5 mm のヘッドホン端子（ヘッドホンを抜き差しすると自動で切り替わる） | UEFI R402（APE のクロック、ADMA/ADMAIF/XBAR/I2S1、コーデック ALC5639、DSDT の AUD0）と R403（ヘッドホンの経路、ジャックのスイッチ PV6）+ `switchaudio.sys` 1.0.0.7（PortCls の WaveRT、48 kHz・16 ビット・ステレオ） |
 | 再起動しても時計が合っている | `switchrtc.sys` が MAX77620 の RTC を読み、最後の時刻同期で覚えたずれを足す。RTC には書き込まないので、Horizon の時計には影響しない |
 
 **まだできないこと:**
 - GPU による高速化（今は標準の画面ドライバーで描いている）
-- Wi-Fi（Bluetooth の電波が近くまでしか届かないのも、Wi-Fi 側が動いていないためと見ている）
 - Joy-Con のレール
 - スリープ
 - 音声で足りないところ:
@@ -85,6 +85,7 @@ Windows のイメージとライセンスは、各自で用意してください
 
 - **今使う版は R403。** 変更点と実機の結果は `docs/ja/uefi-revisions/R403-README-ja.md`。
   - R392 に、`switchaudio.sys` のための音声の準備を足したもの。スピーカーは R402、ヘッドホンは R403。2026-11-02 に実機で確かめた。
+  - R404/R405はWi-Fiの持ち上げ（ベータ）。R404でPCIe port 1（BCM4356）を持ち上げ、R405でDSDT WLN0（`ACPI\SWOA0D01`）を足して `switchwlan.sys` に対応。動作確認済みの構成はR403のまま。Wi-Fiのベータを使いたい場合のみR404/R405を使う。
 - R392 の変更点は `docs/ja/uefi-revisions/R392-README-ja.md`。以降の版はすべて R392 がもと。
   - R390 に、次の2つを足したもの。XUSB のファームウェアを ESP から読む。Bluetooth の UART のクロックを、起動のたびに元に戻す。
 - R393〜R401 は音声の立ち上げの試験（`docs/ja/uefi-revisions/R401-README-ja.md`）。
@@ -99,7 +100,7 @@ Windows のイメージとライセンスは、各自で用意してください
 ## Windows のドライバーの入れ方
 
 ドライバー、導入キット、コントロールセンター（SwitchCenter）は、[Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers) に移しました。
-そちらのリリースの ZIP を取ってきて、README の手順で入れてください。順番は、テスト署名の準備、GPIO、I2C、バッテリー、ファン、タッチ、電源ボタン、CPU クロック、時計（RTC）、センサー、Bluetooth、音声です。入れたあとは、コントロールセンターからドライバーを更新（OTA）できます。
+そちらのリリースの ZIP を取ってきて、README の手順で入れてください。順番は、テスト署名の準備、GPIO、I2C、バッテリー、ファン、タッチ、電源ボタン、CPU クロック、時計（RTC）、センサー、Bluetooth、音声、Wi-Fi（ベータ）です。入れたあとは、コントロールセンターからドライバーを更新（OTA）できます。
 
 ## クレジット
 

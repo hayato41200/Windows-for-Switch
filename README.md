@@ -37,10 +37,11 @@ EDK2 platform package, whose history is kept here). It adds:
 | Touch screen: multi-touch, press-and-hold | UEFI powers the FTM4 + `switchtouch.sys` |
 | Screen auto-rotation | UEFI R379 (SPI4/I2C2 clocks, DSDT SENS) + `switchsensor.sys` (LSM6DS3H) + tray app |
 | Bluetooth (keyboard, audio) | UEFI R390 (chip power, DSDT BTH0) + `switchbt.sys` + inbox BthMini. Bring your own `BCM4356A3.hcd` patch. Range is very short for now |
+| Wi-Fi (beta): WPA2-Personal connect, DHCP, internet access; Wi-Fi 5 (802.11ac), 866/866 Mbit/s | UEFI R404/R405 (PCIe port 1, BCM4356, DSDT WLN0) + `switchwlan.sys` 0.6.13 (beta, in Windows-for-Switch-Drivers). Bring your own `brcmfmac4356(A3)-pcie.bin/.txt` firmware (tested 7.35.252.108). Tested 2026-11-08: fast.com 55 Mbit/s down / 39 Mbit/s up |
 | Audio: speakers and the 3.5 mm headphone jack (switches automatically when headphones are plugged in or out) | UEFI R402 (APE clocks, ADMA/ADMAIF/XBAR/I2S1, ALC5639 codec, DSDT AUD0) and R403 (headphone path, jack switch PV6) + `switchaudio.sys` 1.0.0.7 (PortCls WaveRT, 48 kHz 16-bit stereo) |
 | Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
-Not done: GPU acceleration (basic display only), Wi-Fi (also likely why the Bluetooth range is short), Joy-Con rail, sleep.
+Not done: GPU acceleration (basic display only), Joy-Con rail, sleep.
 Audio limits: the speakers and the headphones are one Windows output ("Speakers") and share one volume, so turn the volume down before plugging headphones in; the codec level is fixed (speakers -18 dB, headphones -24 dB); no microphone.
 
 ## Tested OS
@@ -80,6 +81,7 @@ Bring your own Windows image and license. This repository does not contain Windo
 
 Use R403 (notes: `docs/ja/uefi-revisions/R403-README-ja.md`). It is R392 plus audio: the speakers (R402) and the headphones (R403) for `switchaudio.sys`. Tested on the console on 2026-11-02.
 
+- R404/R405 are the Wi-Fi bring-up (beta): R404 brings up PCIe port 1 (BCM4356), R405 adds DSDT WLN0 (`ACPI\SWOA0D01`) for `switchwlan.sys`. Use R403 for a tested setup; use R404/R405 only if you want the Wi-Fi beta.
 - R392 (notes: `docs/ja/uefi-revisions/R392-README-ja.md`) is R390 with the XUSB firmware read from the ESP and the Bluetooth UART clock reset at every boot. Everything after it builds on it. Do not use R391: its UART clock setting is wrong.
 - R393–R401 are the audio bring-up (notes: `docs/ja/uefi-revisions/R401-README-ja.md`). R400 played a test tone at boot; R401 turns that tone off by default.
 
@@ -94,7 +96,7 @@ Built ROMs (coreboot + UEFI) are not published; build your own as above.
 The drivers, their install kits and the control center (SwitchCenter) are in
 [Windows-for-Switch-Drivers](https://github.com/hayato41200/Windows-for-Switch-Drivers).
 Download the release ZIPs there and follow its README (test signing, then GPIO, I2C,
-battery, fan, touch, power button, CPU clock, RTC, sensors, Bluetooth and audio). The control center can then
+battery, fan, touch, power button, CPU clock, RTC, sensors, Bluetooth, audio and Wi-Fi (beta)). The control center can then
 update the drivers over the air.
 
 ## Credits

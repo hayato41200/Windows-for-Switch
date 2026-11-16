@@ -4743,12 +4743,18 @@ STATIC BOOLEAN R363ConfigureSink (VOID) {
 
 STATIC UINT32 mR412PlluAtStart, mR412PlluAfter;
 STATIC BOOLEAN mR412PlluStarted, mR412UtmipSet;
+#define R413_CAR_RST_DEVICES_W   0x35CU
+#define R413_CAR_RST_DEV_W_CLR   0x43CU
+#define R413_RST_W_XUSB_PADCTL   (1U << 14)
+STATIC UINT32 mR413RstWAtStart;
+STATIC BOOLEAN mR413PadctlReleased;
 
 STATIC VOID R412PrintUsbPll (CONST CHAR16 *Tag) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   // EMC = DRAM clock source/divider (hekate hands over at 204 MHz).
-  Print (L"R412 %s: OSC=%08x EMC=%08x PLLU=%08x/%08x/%08x UTMIP=%08x/%08x/%08x HWPD=%08x\r\n", Tag,
-         Car[R412_CAR_OSC_CTRL / 4], Car[R412_CAR_EMC_SRC / 4], Car[R412_CAR_PLLU_BASE / 4], Car[R412_CAR_PLLU_OUTA / 4],
+  Print (L"R412 %s: OSC=%08x EMC=%08x RST_W=%08x PLLU=%08x/%08x/%08x UTMIP=%08x/%08x/%08x HWPD=%08x\r\n", Tag,
+         Car[R412_CAR_OSC_CTRL / 4], Car[R412_CAR_EMC_SRC / 4], Car[0x35CU / 4],
+         Car[R412_CAR_PLLU_BASE / 4], Car[R412_CAR_PLLU_OUTA / 4],
          Car[R412_CAR_PLLU_MISC / 4], Car[R412_CAR_UTMIP_CFG0 / 4], Car[R412_CAR_UTMIP_CFG1 / 4],
          Car[R412_CAR_UTMIP_CFG2 / 4], Car[R412_CAR_UTMIPLL_HWPD / 4]);
 }
@@ -4762,6 +4768,19 @@ STATIC VOID R412PrepareUsbPll (VOID) {
 
   mR412PlluAtStart = Car[R412_CAR_PLLU_BASE / 4];
   R412PrintUsbPll (L"start");
+  // R413: hekate puts XUSB_PADCTL back in reset when its USB code ends
+  // (bdk usbd.c/xusbd.c: RST_DEV_W_SET bit 14). The first PADCTL read in
+  // R295BeginLinuxMatchedPath (0x7009F004) then raised an SError. Release it
+  // as hekate and Linux do before touching the pads. The coreboot chain has
+  // it released already and is unchanged.
+  mR413RstWAtStart = Car[R413_CAR_RST_DEVICES_W / 4];
+  if ((mR413RstWAtStart & R413_RST_W_XUSB_PADCTL) != 0) {
+    Car[R413_CAR_RST_DEV_W_CLR / 4] = R413_RST_W_XUSB_PADCTL;
+    gBS->Stall (2);
+    mR413PadctlReleased = TRUE;
+    Print (L"R413 XUSB_PADCTL was in reset (RST_W=%08x); released -> RST_W=%08x\r\n",
+           mR413RstWAtStart, Car[R413_CAR_RST_DEVICES_W / 4]);
+  }
   if (OscBits != R412_OSC_FREQ_38P4) {
     Print (L"R412 OSC freq code %u is not 38.4 MHz; PLLU/UTMIP left as found\r\n", OscBits);
     mR412PlluAfter = mR412PlluAtStart;
@@ -4825,9 +4844,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R412H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R413H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
-  Print (L" Nintendo Switch UEFI XUSB bring-up R412 (PLLU/UTMIP after hekate, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -5092,11 +5111,12 @@ R288Cleanup:
   // R412: the summary used to say BM92T_HOST_GATE for every stop on the sink
   // (hub + charger) and nothing-attached paths, which go on to XUSB without
   // the host gate. Name the stage that actually stopped.
-  Print (L"R412 path=%s PLLU start/after=%08x/%08x%s%s\r\n",
+  Print (L"R412 path=%s PLLU start/after=%08x/%08x%s%s%s\r\n",
          SinkGatePassed ? L"SINK(hub+charger)" : HostGatePassed ? L"HOST(VBUS)" :
          mR378NoPartner ? L"NOTHING-ATTACHED" : L"BEFORE-GATE",
          mR412PlluAtStart, mR412PlluAfter,
-         mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"");
+         mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"",
+         mR413PadctlReleased ? L" PADCTL reset released" : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {
     Print (L"STOP_POINT=BM92T_READ_OR_SETUP; I2C/BM92T stopped before the role gate.\r\n");
   } else if (SinkGatePassed && !mR363SinkMode) {

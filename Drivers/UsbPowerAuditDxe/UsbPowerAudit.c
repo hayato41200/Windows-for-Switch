@@ -4749,6 +4749,38 @@ STATIC BOOLEAN mR412PlluStarted, mR412UtmipSet;
 STATIC UINT32 mR413RstWAtStart;
 STATIC BOOLEAN mR413PadctlReleased;
 
+// R414: coreboot power-gates XUSBA/XUSBB/XUSBC on every boot
+// (mainboard powergate_unused_partitions); hekate leaves them powered. The
+// R243 baseline needs them off (R413H: PG=3FFEC14D, Gate=R243-BASELINE). Gate
+// them the way coreboot does, only while host, device and SuperSpeed are all
+// in reset with their clocks off (nothing is using them). No change on the
+// coreboot chain, where they are already off.
+STATIC UINT32 mR414PgAtStart;
+STATIC BOOLEAN mR414Gated, mR414GateFail;
+STATIC VOID R414GateIdleXusbPartitions (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  CONST UINT32 Domains = (1U << 20) | (1U << 21) | (1U << 22);
+  CONST UINT32 UBits = (1U << 25) | (1U << 31);   // XUSB host, XUSB device
+  CONST UINT32 SsBit = 1U << 28, XusbGate = 1U << 15;
+  UINT32 ClkU = Car[0x018 / 4], RstU = Car[0x00C / 4], ClkW = Car[0x364 / 4], RstW = Car[0x35C / 4];
+
+  mR414PgAtStart = Pmc[0x038 / 4];
+  if ((mR414PgAtStart & Domains) == 0) return;
+  if ((ClkU & UBits) != 0 || (RstU & UBits) != UBits ||
+      (ClkW & (SsBit | XusbGate)) != 0 || (RstW & SsBit) == 0) {
+    Print (L"R414 XUSB partitions on (PG=%08x) but XUSB is in use (CLK_U/RST_U=%08x/%08x CLK_W/RST_W=%08x/%08x); left on\r\n",
+           mR414PgAtStart, ClkU, RstU, ClkW, RstW);
+    return;
+  }
+  // Dependents first: XUSBC (host), XUSBB (device), then XUSBA.
+  mR414GateFail = !SetPowerPartition (22, FALSE) || !SetPowerPartition (21, FALSE) ||
+                  !SetPowerPartition (20, FALSE);
+  mR414Gated = TRUE;
+  Print (L"R414 XUSB partitions left on by the previous loader: PG %08x -> %08x (%s)\r\n",
+         mR414PgAtStart, Pmc[0x038 / 4], mR414GateFail ? L"GATE TIMEOUT" : L"gated as coreboot does");
+}
+
 STATIC VOID R412PrintUsbPll (CONST CHAR16 *Tag) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   // EMC = DRAM clock source/divider (hekate hands over at 204 MHz).
@@ -4808,7 +4840,11 @@ STATIC VOID R412PrepareUsbPll (VOID) {
   Cfg1 = (0U << 27) | (1U << 16) | (1U << 15) | ((Khz + 299U) / 300U);
   Cfg2 = (((Khz + 6399U) / 6400U) << 18) | (0U << 6) |
          (1U << 1) | (1U << 3) | (1U << 5) | (1U << 25);
-  if (Car[R412_CAR_UTMIP_CFG1 / 4] != Cfg1 || Car[R412_CAR_UTMIP_CFG2 / 4] != Cfg2) {
+  // R414: only when nobody set USB up. R413H found PLLU running with
+  // hekate's own clock_enable_pllu() value (4BE11902) and its UTMIP PLL
+  // settings; overwriting those with coreboot's is not what either chain does.
+  if (mR412PlluStarted &&
+      (Car[R412_CAR_UTMIP_CFG1 / 4] != Cfg1 || Car[R412_CAR_UTMIP_CFG2 / 4] != Cfg2)) {
     Car[R412_CAR_UTMIP_CFG1 / 4] = Cfg1;
     Car[R412_CAR_UTMIP_CFG2 / 4] = Cfg2;
     mR412UtmipSet = TRUE;
@@ -4819,6 +4855,7 @@ STATIC VOID R412PrepareUsbPll (VOID) {
 #endif
   mR412PlluAfter = Car[R412_CAR_PLLU_BASE / 4];
   if (mR412PlluStarted || mR412UtmipSet) R412PrintUsbPll (L"after");
+  R414GateIdleXusbPartitions ();
 }
 
 STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
@@ -4844,9 +4881,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R413H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R414H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
-  Print (L" Nintendo Switch UEFI XUSB bring-up R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+  Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
@@ -5117,6 +5154,8 @@ R288Cleanup:
          mR412PlluAtStart, mR412PlluAfter,
          mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"",
          mR413PadctlReleased ? L" PADCTL reset released" : L"");
+  Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
+         mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {
     Print (L"STOP_POINT=BM92T_READ_OR_SETUP; I2C/BM92T stopped before the role gate.\r\n");
   } else if (SinkGatePassed && !mR363SinkMode) {

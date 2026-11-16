@@ -4716,6 +4716,92 @@ STATIC BOOLEAN R363ConfigureSink (VOID) {
   return TRUE;
 }
 
+// R412: hekate (L4T launcher) chain. coreboot's clock_init() runs init_pllu()
+// and init_utmip_pll() on every boot (soc/nvidia/tegra210/clock.c); hekate
+// enables PLLU only for its own USB gadget mode and never programs the UTMIP
+// PLL. The XUSB bring-up below requires PLLU enabled+locked (R243 baseline)
+// and was skipped after hekate, with Windows then meeting XHC0 un-started.
+// Show the state the previous loader left, and when PLLU is not running,
+// repeat coreboot's init_pllu (38.4 MHz OSC: N=25 M=2 P=1, lock enable,
+// bounded lock wait). In the hekate build also apply coreboot's UTMIP PLL
+// CFG1/CFG2 values. The coreboot chain finds PLLU locked and is unchanged.
+#define R412_CAR_OSC_CTRL      0x050U
+#define R412_CAR_EMC_SRC       0x19CU
+#define R412_CAR_PLLU_BASE     0x0C0U
+#define R412_CAR_PLLU_OUTA     0x0C4U
+#define R412_CAR_PLLU_MISC     0x0CCU
+#define R412_CAR_UTMIP_CFG0    0x480U
+#define R412_CAR_UTMIP_CFG1    0x484U
+#define R412_CAR_UTMIP_CFG2    0x488U
+#define R412_CAR_UTMIPLL_HWPD  0x52CU
+#define R412_PLL_ENABLE        (1U << 30)
+#define R412_PLL_LOCK          (1U << 27)
+#define R412_PLL_BYPASS        (1U << 31)
+#define R412_PLLU_IDDQ         (1U << 31)
+#define R412_PLLU_LOCK_ENABLE  (1U << 29)
+#define R412_OSC_FREQ_38P4     5U
+
+STATIC UINT32 mR412PlluAtStart, mR412PlluAfter;
+STATIC BOOLEAN mR412PlluStarted, mR412UtmipSet;
+
+STATIC VOID R412PrintUsbPll (CONST CHAR16 *Tag) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  // EMC = DRAM clock source/divider (hekate hands over at 204 MHz).
+  Print (L"R412 %s: OSC=%08x EMC=%08x PLLU=%08x/%08x/%08x UTMIP=%08x/%08x/%08x HWPD=%08x\r\n", Tag,
+         Car[R412_CAR_OSC_CTRL / 4], Car[R412_CAR_EMC_SRC / 4], Car[R412_CAR_PLLU_BASE / 4], Car[R412_CAR_PLLU_OUTA / 4],
+         Car[R412_CAR_PLLU_MISC / 4], Car[R412_CAR_UTMIP_CFG0 / 4], Car[R412_CAR_UTMIP_CFG1 / 4],
+         Car[R412_CAR_UTMIP_CFG2 / 4], Car[R412_CAR_UTMIPLL_HWPD / 4]);
+}
+
+STATIC VOID R412PrepareUsbPll (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  UINT32 Osc = Car[R412_CAR_OSC_CTRL / 4];
+  UINT32 OscBits = (Osc >> 28) & 0xFU, PreDiv = (Osc >> 26) & 3U;
+  UINT32 Khz, Dividers, Cfg1, Cfg2;
+  UINTN I;
+
+  mR412PlluAtStart = Car[R412_CAR_PLLU_BASE / 4];
+  R412PrintUsbPll (L"start");
+  if (OscBits != R412_OSC_FREQ_38P4) {
+    Print (L"R412 OSC freq code %u is not 38.4 MHz; PLLU/UTMIP left as found\r\n", OscBits);
+    mR412PlluAfter = mR412PlluAtStart;
+    return;
+  }
+  Khz = 38400U >> PreDiv;
+
+  if ((mR412PlluAtStart & (R412_PLL_ENABLE | R412_PLL_LOCK)) != (R412_PLL_ENABLE | R412_PLL_LOCK)) {
+    // coreboot init_pllu() + init_pll(PLLU_INDEX): PLLU(25, 2, 1) for 38.4 MHz.
+    Dividers = (25U << 8) | (1U << 16) | 2U;
+    Car[R412_CAR_PLLU_MISC / 4] &= ~R412_PLLU_IDDQ;
+    gBS->Stall (5);
+    Car[R412_CAR_PLLU_BASE / 4] = Dividers | R412_PLL_BYPASS;
+    Car[R412_CAR_PLLU_MISC / 4] |= R412_PLLU_LOCK_ENABLE;
+    Car[R412_CAR_PLLU_BASE / 4] = Dividers | R412_PLL_ENABLE;
+    for (I = 0; I < 1000 && (Car[R412_CAR_PLLU_BASE / 4] & R412_PLL_LOCK) == 0; ++I) gBS->Stall (1);
+    mR412PlluStarted = TRUE;
+    Print (L"R412 PLLU was not running; started as coreboot does: %s after %u us\r\n",
+           (Car[R412_CAR_PLLU_BASE / 4] & R412_PLL_LOCK) ? L"LOCKED" : L"NO LOCK", (UINT32)I);
+  }
+
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+  // coreboot init_utmip_pll(): phy_stb_ct = khz/300, phy_act_ct = khz/6400
+  // (rounded up), PLLU enable/stable delays 0, force the PLL and samplers up.
+  Cfg1 = (0U << 27) | (1U << 16) | (1U << 15) | ((Khz + 299U) / 300U);
+  Cfg2 = (((Khz + 6399U) / 6400U) << 18) | (0U << 6) |
+         (1U << 1) | (1U << 3) | (1U << 5) | (1U << 25);
+  if (Car[R412_CAR_UTMIP_CFG1 / 4] != Cfg1 || Car[R412_CAR_UTMIP_CFG2 / 4] != Cfg2) {
+    Car[R412_CAR_UTMIP_CFG1 / 4] = Cfg1;
+    Car[R412_CAR_UTMIP_CFG2 / 4] = Cfg2;
+    mR412UtmipSet = TRUE;
+    Print (L"R412 UTMIP PLL CFG1/CFG2 set as coreboot does (pll input %u kHz)\r\n", Khz);
+  }
+#else
+  (VOID)Cfg1; (VOID)Cfg2; (VOID)Khz;
+#endif
+  mR412PlluAfter = Car[R412_CAR_PLLU_BASE / 4];
+  if (mR412PlluStarted || mR412UtmipSet) R412PrintUsbPll (L"after");
+}
+
 STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   EFI_SYSTEM_TABLE *St = (EFI_SYSTEM_TABLE *)Context;
   volatile UINT32 *B = (volatile UINT32 *)BASE_ADDR;
@@ -4738,13 +4824,17 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->SetAttribute (St->ConOut, EFI_WHITE | EFI_BACKGROUND_BLUE);
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
-  Print (L" Nintendo Switch UEFI XUSB bring-up R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+  Print (L" R412H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+#endif
+  Print (L" Nintendo Switch UEFI XUSB bring-up R412 (PLLU/UTMIP after hekate, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
   Print (L"charger already connected (Switch charges, still USB host). No PC.\r\n");
   Print (L"XUSB, PADCTL and power settings are left running for the stock USB stack.\r\n\r\n");
   R388PrintXusbClocks (L"start");
+  R412PrepareUsbPll ();
   ZeroMem (mR293Car, sizeof (mR293Car));
   CaptureR293Car (R293_EARLY);
 
@@ -4999,9 +5089,19 @@ R288Cleanup:
          mR260Usb2PortSc[0] & 1U, mR260Usb2PortSc[1] & 1U,
          mR260Usb2PortSc[2] & 1U, mR260Usb2PortSc[3] & 1U,
          mR260Usb2PortSc[4] & 1U, mR260Usb2PortValidMask);
-  if (!HostGatePassed) {
-    Print (L"STOP_POINT=BM92T_HOST_GATE; later stages were not reached.\r\n");
-  } else if (!BqEnableOk) {
+  // R412: the summary used to say BM92T_HOST_GATE for every stop on the sink
+  // (hub + charger) and nothing-attached paths, which go on to XUSB without
+  // the host gate. Name the stage that actually stopped.
+  Print (L"R412 path=%s PLLU start/after=%08x/%08x%s%s\r\n",
+         SinkGatePassed ? L"SINK(hub+charger)" : HostGatePassed ? L"HOST(VBUS)" :
+         mR378NoPartner ? L"NOTHING-ATTACHED" : L"BEFORE-GATE",
+         mR412PlluAtStart, mR412PlluAfter,
+         mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"");
+  if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {
+    Print (L"STOP_POINT=BM92T_READ_OR_SETUP; I2C/BM92T stopped before the role gate.\r\n");
+  } else if (SinkGatePassed && !mR363SinkMode) {
+    Print (L"STOP_POINT=SINK_CHARGER_SETUP; see the R363 BQ lines above.\r\n");
+  } else if (HostGatePassed && !BqEnableOk) {
     Print (L"STOP_POINT=VBUS_SETUP; inspect BQ identity/readback above.\r\n");
   } else if (!mR295Path.Applied) {
     Print (L"STOP_POINT=USB2_PATH_SETUP; inspect path readback above.\r\n");

@@ -39,7 +39,10 @@ STATIC BIO_INSTANCE mBioTemplate = {
         TRUE,                                     // RemovableMedia
         TRUE,                                     // MediaPresent
         FALSE,                                    // LogicalPartition
-        FALSE,                                    // ReadOnly (writes gated to FAT partitions, see SdWriteAllowed)
+        TRUE,                                     // ReadOnly. R415: as the coreboot-chain driver. With a
+                                                  // writable SD, Windows Boot Manager failed on hekate with
+                                                  // "BCD missing or contains errors" (0xc000000f) while the
+                                                  // read-only coreboot chain boots the same SD.
         FALSE,                                    // WriteCaching
         0,                                        // BlockSize
         4,                                        // IoAlign
@@ -382,6 +385,7 @@ MMCHSWriteBlocks(
     BlockSize = Media->BlockSize;
 
     if (MediaId != Media->MediaId) return EFI_MEDIA_CHANGED;
+    if (Media->ReadOnly) return EFI_WRITE_PROTECTED;
     if (Buffer == NULL) return EFI_INVALID_PARAMETER;
     if (BufferSize == 0) return EFI_SUCCESS;
     if (BufferSize % BlockSize != 0) return EFI_BAD_BUFFER_SIZE;

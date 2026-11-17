@@ -127,6 +127,28 @@ STATIC PLATFORM_USB_KEYBOARD mUsbKeyboard = {
   }
 };
 
+//
+// The side buttons (Drivers/SidebandButtonDxe): VOL+ Up, VOL- Down, power Enter
+// (held: Esc). Keep the GUID in sync with SIDEBAND_BUTTON_DEVICE_GUID there.
+//
+#pragma pack (1)
+typedef struct {
+  VENDOR_DEVICE_PATH       Vendor;
+  EFI_DEVICE_PATH_PROTOCOL End;
+} PLATFORM_SIDEBAND_BUTTONS;
+#pragma pack ()
+
+STATIC PLATFORM_SIDEBAND_BUTTONS mSidebandButtons = {
+  {
+    { HARDWARE_DEVICE_PATH, HW_VENDOR_DP, DP_NODE_LEN (VENDOR_DEVICE_PATH) },
+    { 0x8e2d6a14, 0x3b5f, 0x4c71, { 0x9a, 0x0e, 0x5d, 0x2c, 0x61, 0x7b, 0x48, 0xf3 } }
+  },
+  {
+    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
+    DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
+  }
+};
+
 
 /**
   Check if the handle satisfies a particular condition.
@@ -400,6 +422,7 @@ PlatformRegisterOptionsAndKeys (
   EFI_INPUT_KEY                Enter;
   EFI_INPUT_KEY                F2;
   EFI_INPUT_KEY                Esc;
+  EFI_INPUT_KEY                VolUp;
   EFI_BOOT_MANAGER_LOAD_OPTION BootOption;
 
   //
@@ -425,6 +448,17 @@ PlatformRegisterOptionsAndKeys (
   ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
   Status = EfiBootManagerAddKeyOptionVariable (
              NULL, (UINT16) BootOption.OptionNumber, 0, &Esc, NULL
+             );
+  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
+
+  //
+  // VOL+ (SidebandButtonDxe sends it as Up, repeated while held) opens the
+  // menu too. A USB keyboard's Up arrow during the wait does the same.
+  //
+  VolUp.ScanCode    = SCAN_UP;
+  VolUp.UnicodeChar = CHAR_NULL;
+  Status = EfiBootManagerAddKeyOptionVariable (
+             NULL, (UINT16) BootOption.OptionNumber, 0, &VolUp, NULL
              );
   ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
 }
@@ -497,6 +531,12 @@ PlatformBootManagerBeforeConsole (
     (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard, NULL);
 
   //
+  // Add the side buttons (VOL+/VOL-/power) to ConIn.
+  //
+  EfiBootManagerUpdateConsoleVariable (ConIn,
+    (EFI_DEVICE_PATH_PROTOCOL *)&mSidebandButtons, NULL);
+
+  //
   // Add the hardcoded serial console device path to ConIn, ConOut, ErrOut.
   //
   ASSERT (FixedPcdGet8 (PcdDefaultTerminalType) == 4);
@@ -552,7 +592,7 @@ PlatformBootManagerAfterConsole (
       Print (VERSION_STRING_PREFIX L"%s\n",
         PcdGetPtr (PcdFirmwareVersionString));
     }
-    Print (L"Press ESCAPE for boot options ");
+    Print (L"Hold VOL+ (or press ESC) for boot options ");
   } else if (FirmwareVerLength > 0) {
     Status = gBS->HandleProtocol (gST->ConsoleOutHandle,
                     &gEfiGraphicsOutputProtocolGuid, (VOID **)&GraphicsOutput);
@@ -622,7 +662,7 @@ PlatformBootManagerWaitCallback (
   Status = BootLogoUpdateProgress (
              White.Pixel,
              Black.Pixel,
-             L"Press ESCAPE for boot options",
+             L"Hold VOL+ (or press ESC) for boot options",
              White.Pixel,
              (Timeout - TimeoutRemain) * 100 / Timeout,
              0

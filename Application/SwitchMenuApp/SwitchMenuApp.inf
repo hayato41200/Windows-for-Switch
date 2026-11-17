@@ -1,0 +1,44 @@
+# SwitchMenuApp.inf: touch boot menu (VOL+ at boot): Boot Windows, Return to hekate,
+# UEFI settings, Power off. GOP drawing, SwitchTouchDxe touch, side buttons as keys.
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = SwitchMenuApp
+  FILE_GUID                      = a7c3e815-4d92-4b6e-9f20-63d1b85e0c4a
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = SwitchMenuMain
+
+[Sources]
+  SwitchMenu.c
+  Font.h
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  ArmPkg/ArmPkg.dec
+  NintendoSwitchPkg/NintendoSwitch.dec
+
+[LibraryClasses]
+  ArmLib
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  I2cLib
+  IoLib
+  MemoryAllocationLib
+  PrintLib
+  UefiApplicationEntryPoint
+  UefiBootManagerLib
+  UefiBootServicesTableLib
+  UefiLib
+  UefiRuntimeServicesTableLib
+
+[Guids]
+  gEfiFileInfoGuid
+
+[Protocols]
+  gEfiGraphicsOutputProtocolGuid
+  gEfiAbsolutePointerProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid

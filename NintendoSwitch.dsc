@@ -409,6 +409,7 @@
 
   # Drivers
   NintendoSwitchPkg/Drivers/SidebandButtonDxe/SidebandButtonDxe.inf
+  NintendoSwitchPkg/Drivers/SwitchTouchDxe/SwitchTouchDxe.inf
   NintendoSwitchPkg/Drivers/ClockManagementDxe/ClockManagementDxe.inf
   NintendoSwitchPkg/Drivers/PmicDxe/PmicDxe.inf
   NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf
@@ -446,6 +447,7 @@
       NULL|MdeModulePkg/Library/BootManagerUiLib/BootManagerUiLib.inf
       NULL|MdeModulePkg/Library/BootMaintenanceManagerUiLib/BootMaintenanceManagerUiLib.inf
   }
+  NintendoSwitchPkg/Application/SwitchMenuApp/SwitchMenuApp.inf
 
   # Disk IO
   MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf

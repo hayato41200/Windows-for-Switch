@@ -103,6 +103,7 @@ READ_LOCK_STATUS   = TRUE
   INF MdeModulePkg/Universal/DriverHealthManagerDxe/DriverHealthManagerDxe.inf
   INF MdeModulePkg/Universal/BdsDxe/BdsDxe.inf
   INF MdeModulePkg/Application/UiApp/UiApp.inf
+  INF NintendoSwitchPkg/Application/SwitchMenuApp/SwitchMenuApp.inf
 
   # SMBIOS
   INF NintendoSwitchPkg/Drivers/SmBiosTableDxe/SmBiosTableDxe.inf
@@ -115,6 +116,7 @@ READ_LOCK_STATUS   = TRUE
 
   # Drivers
   INF NintendoSwitchPkg/Drivers/SidebandButtonDxe/SidebandButtonDxe.inf
+  INF NintendoSwitchPkg/Drivers/SwitchTouchDxe/SwitchTouchDxe.inf
   INF NintendoSwitchPkg/Drivers/ClockManagementDxe/ClockManagementDxe.inf
   INF NintendoSwitchPkg/Drivers/PmicDxe/PmicDxe.inf
   INF NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf

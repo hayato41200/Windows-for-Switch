@@ -22,6 +22,7 @@
 #include <Library/DevicePathLib.h>
 #include <Library/HobLib.h>
 #include <Library/PcdLib.h>
+#include <Library/PrintLib.h>
 #include <Library/UefiBootManagerLib.h>
 #include <Library/UefiLib.h>
 #include <Protocol/DevicePath.h>
@@ -350,7 +351,7 @@ AddOutput (
 }
 
 STATIC
-VOID
+UINTN
 PlatformRegisterFvBootOption (
   CONST EFI_GUID                   *FileGuid,
   CHAR16                           *Description,
@@ -365,6 +366,7 @@ PlatformRegisterFvBootOption (
   MEDIA_FW_VOL_FILEPATH_DEVICE_PATH FileNode;
   EFI_LOADED_IMAGE_PROTOCOL         *LoadedImage;
   EFI_DEVICE_PATH_PROTOCOL          *DevicePath;
+  UINTN                             OptionNumber;
 
   Status = gBS->HandleProtocol (
                   gImageHandle,
@@ -406,11 +408,23 @@ PlatformRegisterFvBootOption (
   if (OptionIndex == -1) {
     Status = EfiBootManagerAddLoadOptionVariable (&NewOption, MAX_UINTN);
     ASSERT_EFI_ERROR (Status);
+    OptionNumber = EFI_ERROR (Status) ? LoadOptionNumberUnassigned : NewOption.OptionNumber;
+  } else {
+    OptionNumber = BootOptions[OptionIndex].OptionNumber;
   }
   EfiBootManagerFreeLoadOption (&NewOption);
   EfiBootManagerFreeLoadOptions (BootOptions, BootOptionCount);
+  return OptionNumber;
 }
 
+
+//
+// Application/SwitchMenuApp FILE_GUID, and its Boot#### number once registered.
+//
+STATIC CONST EFI_GUID mSwitchMenuAppFile = {
+  0xa7c3e815, 0x4d92, 0x4b6e, { 0x9f, 0x20, 0x63, 0xd1, 0xb8, 0x5e, 0x0c, 0x4a }
+};
+STATIC UINTN mSwitchMenuOption = LoadOptionNumberUnassigned;
 
 STATIC
 VOID
@@ -453,12 +467,22 @@ PlatformRegisterOptionsAndKeys (
 
   //
   // VOL+ (SidebandButtonDxe sends it as Up, repeated while held) opens the
-  // menu too. A USB keyboard's Up arrow during the wait does the same.
+  // touch menu (Application/SwitchMenuApp), registered as a hidden APP-category
+  // Boot#### that BDS never boots on its own. A USB keyboard's Up arrow during
+  // the wait does the same. Replace any older Up key option (R420H: UiApp).
   //
   VolUp.ScanCode    = SCAN_UP;
   VolUp.UnicodeChar = CHAR_NULL;
+  mSwitchMenuOption = PlatformRegisterFvBootOption (
+                        &mSwitchMenuAppFile, L"Switch touch menu",
+                        LOAD_OPTION_ACTIVE | LOAD_OPTION_HIDDEN | LOAD_OPTION_CATEGORY_APP
+                        );
+  EfiBootManagerDeleteKeyOptionVariable (NULL, 0, &VolUp, NULL);
   Status = EfiBootManagerAddKeyOptionVariable (
-             NULL, (UINT16) BootOption.OptionNumber, 0, &VolUp, NULL
+             NULL,
+             (UINT16) ((mSwitchMenuOption != LoadOptionNumberUnassigned) ?
+                       mSwitchMenuOption : BootOption.OptionNumber),
+             0, &VolUp, NULL
              );
   ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
 }
@@ -687,6 +711,21 @@ VOID EFIAPI PlatformBootManagerUnableToBoot(VOID)
   // BootManagerMenu doesn't contain the correct information when return status
   // is EFI_NOT_FOUND.
   //
+  //
+  // The touch menu first (it offers UEFI settings too), the stock menu after.
+  //
+  if (mSwitchMenuOption != LoadOptionNumberUnassigned) {
+    CHAR16                       OptionName[sizeof ("Boot####")];
+    EFI_BOOT_MANAGER_LOAD_OPTION SwitchMenu;
+
+    UnicodeSPrint (OptionName, sizeof (OptionName), L"Boot%04x", mSwitchMenuOption);
+    if (!EFI_ERROR (EfiBootManagerVariableToLoadOption (OptionName, &SwitchMenu))) {
+      for (;;) {
+        EfiBootManagerBoot (&SwitchMenu);
+      }
+    }
+  }
+
   Status = EfiBootManagerGetBootManagerMenu(&BootManagerMenu);
   if (EFI_ERROR(Status)) {
     return;

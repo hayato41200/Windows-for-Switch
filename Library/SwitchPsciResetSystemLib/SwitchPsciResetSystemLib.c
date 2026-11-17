@@ -60,26 +60,18 @@ SwitchResetVirtualAddressChange (
   }
 }
 
-/**
-  Register the PWM page as runtime MMIO. Done at ReadyToBoot, when the CPU
-  arch protocol is surely there (SetMemorySpaceAttributes needs it).
-**/
 STATIC
-VOID
-EFIAPI
-SwitchResetReadyToBoot (
-  IN EFI_EVENT  Event,
-  IN VOID       *Context
+EFI_STATUS
+SwitchResetRegisterPwm (
+  VOID
   )
 {
   EFI_STATUS                       Status;
   EFI_GCD_MEMORY_SPACE_DESCRIPTOR  Desc;
 
-  gBS->CloseEvent (Event);
-
   Status = gDS->GetMemorySpaceDescriptor (SWITCH_PWM_BASE, &Desc);
   if (EFI_ERROR (Status)) {
-    return;
+    return Status;
   }
 
   if (Desc.GcdMemoryType == EfiGcdMemoryTypeNonExistent) {
@@ -89,20 +81,17 @@ SwitchResetReadyToBoot (
                     SWITCH_PWM_SIZE,
                     EFI_MEMORY_UC | EFI_MEMORY_RUNTIME
                     );
-    if (EFI_ERROR (Status)) {
-      return;
-    }
   } else if (Desc.GcdMemoryType != EfiGcdMemoryTypeMemoryMappedIo) {
-    return;
+    return EFI_UNSUPPORTED;
   } else if ((Desc.Capabilities & EFI_MEMORY_RUNTIME) == 0) {
     Status = gDS->SetMemorySpaceCapabilities (
                     SWITCH_PWM_BASE,
                     SWITCH_PWM_SIZE,
                     Desc.Capabilities | EFI_MEMORY_UC | EFI_MEMORY_RUNTIME
                     );
-    if (EFI_ERROR (Status)) {
-      return;
-    }
+  }
+  if (EFI_ERROR (Status)) {
+    return Status;
   }
 
   Status = gDS->SetMemorySpaceAttributes (
@@ -113,6 +102,31 @@ SwitchResetReadyToBoot (
   if (!EFI_ERROR (Status)) {
     mPwmRuntime = TRUE;
   }
+  return Status;
+}
+
+/**
+  Register the PWM page as runtime MMIO. Done at ReadyToBoot, when the CPU
+  arch protocol is surely there (SetMemorySpaceAttributes needs it).
+  R417: also show the result, because "no marker on a Windows restart"
+  (R416H) only means something when this worked.
+**/
+STATIC
+VOID
+EFIAPI
+SwitchResetReadyToBoot (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  EFI_STATUS  Status;
+
+  gBS->CloseEvent (Event);
+
+  Status = SwitchResetRegisterPwm ();
+  Print (L"R417 reset marker: PWM runtime MMIO %a (%r)\r\n",
+         mPwmRuntime ? "OK" : "FAILED", Status);
+  gBS->Stall (3000000);
 }
 
 STATIC

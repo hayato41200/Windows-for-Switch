@@ -4858,6 +4858,26 @@ STATIC VOID R412PrepareUsbPll (VOID) {
   R414GateIdleXusbPartitions ();
 }
 
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+// R418: what the bl33 stub (Tools/Bl33/bl33_stub.S pwm_fix) found at the first
+// instruction of bl33, before it put the backlight PWM clock back on CLK_M.
+#define R418_PWM_SAVE 0xAA000800UL
+STATIC VOID R418PrintBl33Pwm (VOID) {
+  volatile UINT32 *Save = (volatile UINT32 *)R418_PWM_SAVE;
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  BOOLEAN On = (Car[CAR_CLK_OUT_ENB_L / 4] & CLK_L_PWM_BIT) != 0 && (Car[CAR_RST_DEVICES_L / 4] & CLK_L_PWM_BIT) == 0;
+  if (Save[0] != 0x314D5750U) {
+    Print (L"R418 bl33 entry PWM: no record (tag %08x)\r\n", Save[0]);
+  } else {
+    Print (L"R418 bl33 entry PWM: SRC=%08x clk=%u reset=%u CSR0=%08x -> SRC=%08x%s\r\n",
+           Save[1], Save[3] & 1U, (Save[3] >> 1) & 1U, Save[2], Save[4],
+           Save[1] != Save[4] ? L" (fixed by the stub)" : L"");
+  }
+  Print (L"R418 now: SRC=%08x CSR0=%08x\r\n", Car[CAR_CLK_SOURCE_PWM / 4],
+         On ? *(volatile UINT32 *)(PWM_BASE + PWM_CSR_0) : 0);
+}
+#endif
+
 STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   EFI_SYSTEM_TABLE *St = (EFI_SYSTEM_TABLE *)Context;
   volatile UINT32 *B = (volatile UINT32 *)BASE_ADDR;
@@ -4881,7 +4901,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R417H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R418H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
@@ -4889,6 +4909,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L"OTG: USB device directly (Switch supplies VBUS), or a USB-C hub with its\r\n");
   Print (L"charger already connected (Switch charges, still USB host). No PC.\r\n");
   Print (L"XUSB, PADCTL and power settings are left running for the stock USB stack.\r\n\r\n");
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+  R418PrintBl33Pwm ();
+#endif
   R388PrintXusbClocks (L"start");
   R412PrepareUsbPll ();
   ZeroMem (mR293Car, sizeof (mR293Car));

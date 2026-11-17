@@ -38,7 +38,50 @@ stub_main:
 	msr	daifset, #0xf			// mask Debug, SError, IRQ, FIQ
 	msr	spsel, #1			// use SP_ELx
 	isb
+	b	pwm_fix				// R418, then the FD
+
+// R418: backlight PWM clock. hekate itself runs PWM0 from CLK_M / 3 (CLK_SOURCE_PWM =
+// 0xC0000004, bdk/soc/clock.c _clock_pwm: 6.4 MHz, 25 kHz PWM), but by the time BL31 enters
+// us the source is 0x80000004 (bits 31:30 = 2 = CLK_32K, Linux mux_pllp_pllc_clk32_clkm):
+// 32.768 kHz / 3 / 256 = ~43 Hz backlight PWM, a visible flicker until UsbPowerAuditDxe
+// (R389) put the source back much later. Put CLK_M back here, at the first instruction of
+// bl33, without resetting the PWM (same write as R389). Only when the PWM clock is enabled
+// and out of reset. The values found are kept at pwm_save for UsbPowerAuditDxe to print.
+// No unconditional B before the final one (make-bl33.py follows the first B to the FD).
+pwm_fix:
+	ldr	x0, =0x60006000			// CAR
+	ldr	w1, [x0, #0x110]		// CLK_SOURCE_PWM
+	ldr	w2, [x0, #0x010]		// CLK_OUT_ENB_L
+	ldr	w3, [x0, #0x004]		// RST_DEVICES_L
+	adr	x9, pwm_save
+	str	w1, [x9, #4]			// +4  source found
+	ubfx	w4, w2, #17, #1			// PWM clock enabled
+	ubfx	w5, w3, #17, #1			// PWM in reset
+	orr	w6, w4, w5, lsl #1
+	str	w6, [x9, #12]			// +12 bit0 clk on, bit1 in reset
+	mov	w7, #0
+	cmp	w6, #1				// on and out of reset
+	b.ne	1f
+	ldr	x8, =0x7000A000			// PWM
+	ldr	w7, [x8]			// CSR_0 (backlight)
+	ldr	w10, =0xC0000004		// CLK_M, divisor 3 (hekate, coreboot chain)
+	cmp	w1, w10
+	b.eq	1f
+	str	w10, [x0, #0x110]
+	dsb	sy
+1:
+	str	w7, [x9, #8]			// +8  PWM CSR_0
+	ldr	w1, [x0, #0x110]
+	str	w1, [x9, #16]			// +16 source now
+	ldr	w11, =0x314D5750		// "PWM1"
+	str	w11, [x9]			// +0  valid tag, written last
+	dsb	sy
 	b	fd_entry			// UEFI FD at stub + 0x1000 (= 0xAA001000)
+	.ltorg
+
+	.org	0x800
+pwm_save:					// 0xAA000800, read by UsbPowerAuditDxe (R418)
+	.word	0, 0, 0, 0, 0
 
 	.org	0x1000
 fd_entry:

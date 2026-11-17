@@ -79,6 +79,16 @@ def check_stub_branch(stub):
     if wb >> 26 != 0b000101:
         fail("stub_main does not end in an unconditional B")
     t = b_target(wb, pc + 12)
+    if t != FD_BASE and LOAD_BASE < t < FD_BASE:
+        # R418: stub_main -> pwm_fix -> FD. pwm_fix has only conditional branches; its first
+        # unconditional B must be the one to the FD.
+        for i in range(64):
+            w = struct.unpack_from("<I", stub, t - LOAD_BASE + 4 * i)[0]
+            if w >> 26 == 0b000101:
+                t = b_target(w, t + 4 * i)
+                break
+        else:
+            fail("pwm_fix has no unconditional B within 64 instructions")
     if t != FD_BASE:
         fail(f"stub branches to {t:#x}, expected FD at {FD_BASE:#x}")
     return t0, t

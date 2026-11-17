@@ -17,9 +17,9 @@
   a button acts when the finger is lifted inside it), or the keys: VOL+/VOL- (Up /
   Down) move the highlight, POWER (Enter) selects, held POWER (Esc) leaves the menu.
 
-  The framebuffer is 720 x 1280 portrait; the menu is laid out on a 1280 x 720
-  landscape canvas and turned into it. "Rotate" turns the picture by 180 degrees
-  and remembers it in the SwitchMenuRotation variable.
+  The framebuffer is 720 x 1280 portrait; the menu is drawn (Draw.c) on a
+  1280 x 720 landscape canvas and turned into it. "Rotate" turns the picture by
+  180 degrees and remembers it in the SwitchMenuRotation variable.
 **/
 
 #include <Uefi.h>
@@ -42,22 +42,11 @@
 #include <Protocol/SimpleFileSystem.h>
 #include <Guid/FileInfo.h>
 
-#include "Font.h"
+#include "Draw.h"
 
 // ---------------------------------------------------------------- constants
 
-#define LW  1280          // landscape canvas
-#define LH  720
-
-#define COLOR_BG        0x00101418
-#define COLOR_HEADER    0x001A2129
-#define COLOR_BUTTON    0x002A3440
-#define COLOR_PRESSED   0x002F7FC0
-#define COLOR_FOCUS     0x003FA9F5
-#define COLOR_TEXT      0x00FFFFFF
-#define COLOR_SUBTEXT   0x00A8B8C8
-#define COLOR_WARN      0x00FFC040
-#define COLOR_MARK      0x00FF4060
+#define COLOR_WARN      0x00FFC857
 
 // Keep in sync with Drivers/SwitchTouchDxe (SWITCH_TOUCH_DEVICE_GUID).
 STATIC EFI_GUID  mTouchDeviceGuid = { 0x3c7f2b90, 0x6d1e, 0x4a58, { 0xb2, 0x47, 0x91, 0x0c, 0xe5, 0x3a, 0x7d, 0x66 } };
@@ -93,39 +82,18 @@ STATIC EFI_GUID  mMenuVarGuid     = { 0x9d41c2e7, 0x58a3, 0x4f0b, { 0x8e, 0x16, 
 #define ONOFFCNFG1_PWR_OFF     0x02
 #define ONOFFCNFG2_SFT_RST_WK  0x80
 
-// ---------------------------------------------------------------- layout
-
-typedef enum { ActBootWindows, ActHekate, ActSettings, ActPowerOff, ActRotate, ActCount } MENU_ACTION;
-
-typedef struct {
-  UINTN          X, Y, W, H;
-  CONST CHAR16   *Label;
-  CONST CHAR16   *Sub;
-  UINTN          Scale;
-} MENU_BUTTON;
-
-STATIC MENU_BUTTON mButtons[ActCount] = {
-  {   40, 120, 580, 230, L"Boot Windows",     L"Windows Boot Manager",       4 },
-  {  660, 120, 580, 230, L"Return to hekate", L"Reboot to the hekate menu",  4 },
-  {   40, 380, 580, 230, L"UEFI settings",    L"Boot Manager and setup",     4 },
-  {  660, 380, 580, 230, L"Power off",        L"Turn the Switch off",        4 },
-  { 1060,  14, 190,  64, L"Rotate",           NULL,                          2 },
-};
-
 // ---------------------------------------------------------------- state
 
 STATIC EFI_GRAPHICS_OUTPUT_PROTOCOL    *mGop;
 STATIC EFI_ABSOLUTE_POINTER_PROTOCOL   *mTouch;
-STATIC UINT32                          *mFb;          // framebuffer-shaped back buffer
+STATIC UINT32                          *mFb;          // framebuffer-shaped copy of the screen
+STATIC UINT32                          *mCanvas;      // landscape LW x LH
+STATIC UINT32                          *mBackground;  // landscape, drawn once
 STATIC UINTN                           mFbW, mFbH;
 STATIC BOOLEAN                         mPortrait;     // framebuffer taller than wide
 STATIC UINT8                           mRotation;     // 0 or 1 (180 degrees)
-STATIC UINTN                           mFocus;
-STATIC INTN                            mPressed = -1;
-STATIC BOOLEAN                         mTouching;
-STATIC INTN                            mTouchX = -1, mTouchY = -1;   // landscape
+STATIC MENU_VIEW                       mView;
 STATIC CHAR16                          mStatus[128];
-STATIC UINT32                          mStatusColor = COLOR_SUBTEXT;
 
 // ---------------------------------------------------------------- drawing
 
@@ -191,145 +159,20 @@ FbToLandscape (
 
 STATIC
 VOID
-FillRect (
-  IN UINTN   X,
-  IN UINTN   Y,
-  IN UINTN   W,
-  IN UINTN   H,
-  IN UINT32  Color
-  )
-{
-  UINTN  Lx, Ly;
-
-  for (Ly = Y; Ly < Y + H && Ly < LH; Ly++) {
-    for (Lx = X; Lx < X + W && Lx < LW; Lx++) {
-      mFb[FbIndex (Lx, Ly)] = Color;
-    }
-  }
-}
-
-STATIC
-VOID
-FrameRect (
-  IN UINTN   X,
-  IN UINTN   Y,
-  IN UINTN   W,
-  IN UINTN   H,
-  IN UINTN   T,
-  IN UINT32  Color
-  )
-{
-  FillRect (X, Y, W, T, Color);
-  FillRect (X, Y + H - T, W, T, Color);
-  FillRect (X, Y, T, H, Color);
-  FillRect (X + W - T, Y, T, H, Color);
-}
-
-STATIC
-UINTN
-TextWidth (
-  IN CONST CHAR16  *Text,
-  IN UINTN         Scale
-  )
-{
-  return StrLen (Text) * FONT_WIDTH * Scale;
-}
-
-STATIC
-VOID
-DrawText (
-  IN UINTN         X,
-  IN UINTN         Y,
-  IN UINTN         Scale,
-  IN UINT32        Color,
-  IN CONST CHAR16  *Text
-  )
-{
-  UINTN   Row, Col, Sx, Sy;
-  CHAR16  C;
-  UINT8   Bits;
-
-  for (; *Text != L'\0'; Text++, X += FONT_WIDTH * Scale) {
-    C = *Text;
-    if ((C < FONT_FIRST) || (C > FONT_LAST)) {
-      C = L'?';
-    }
-    for (Row = 0; Row < FONT_HEIGHT; Row++) {
-      Bits = mFont[C - FONT_FIRST][Row];
-      for (Col = 0; Col < FONT_WIDTH; Col++) {
-        if ((Bits & (0x80 >> Col)) == 0) {
-          continue;
-        }
-        for (Sy = 0; Sy < Scale; Sy++) {
-          for (Sx = 0; Sx < Scale; Sx++) {
-            if ((X + Col * Scale + Sx < LW) && (Y + Row * Scale + Sy < LH)) {
-              mFb[FbIndex (X + Col * Scale + Sx, Y + Row * Scale + Sy)] = Color;
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-STATIC
-VOID
-DrawButton (
-  IN UINTN  Index
-  )
-{
-  MENU_BUTTON  *B = &mButtons[Index];
-  UINT32       Fill;
-  UINTN        TextH, SubH, Top;
-
-  Fill = ((INTN)Index == mPressed) ? COLOR_PRESSED : COLOR_BUTTON;
-  FillRect (B->X, B->Y, B->W, B->H, Fill);
-  if (Index == mFocus) {
-    FrameRect (B->X, B->Y, B->W, B->H, 6, COLOR_FOCUS);
-  }
-  TextH = FONT_HEIGHT * B->Scale;
-  SubH  = (B->Sub != NULL) ? FONT_HEIGHT * 2 + 16 : 0;
-  Top   = B->Y + (B->H - TextH - SubH) / 2;
-  DrawText (B->X + (B->W - TextWidth (B->Label, B->Scale)) / 2, Top, B->Scale, COLOR_TEXT, B->Label);
-  if (B->Sub != NULL) {
-    DrawText (B->X + (B->W - TextWidth (B->Sub, 2)) / 2, Top + TextH + 16, 2, COLOR_SUBTEXT, B->Sub);
-  }
-}
-
-STATIC
-VOID
 Render (
   VOID
   )
 {
-  UINTN   Index;
-  CHAR16  Line[96];
+  UINTN  Lx, Ly;
 
-  FillRect (0, 0, LW, LH, COLOR_BG);
-  FillRect (0, 0, LW, 92, COLOR_HEADER);
-  DrawText (40, 18, 3, COLOR_TEXT, L"Switch boot menu");
-  for (Index = 0; Index < ActCount; Index++) {
-    DrawButton (Index);
+  mView.TouchDriver = (mTouch != NULL);
+  mView.Status      = (mStatus[0] != L'\0') ? mStatus : NULL;
+  MenuRender (mCanvas, mBackground, &mView);
+  for (Ly = 0; Ly < LH; Ly++) {
+    for (Lx = 0; Lx < LW; Lx++) {
+      mFb[FbIndex (Lx, Ly)] = mCanvas[Ly * LW + Lx];
+    }
   }
-
-  DrawText (40, 636, 2, COLOR_SUBTEXT, L"Touch a button, or VOL+ / VOL- to move and POWER to select.");
-  if (mStatus[0] != L'\0') {
-    DrawText (40, 676, 2, mStatusColor, mStatus);
-  } else if (mTouch == NULL) {
-    DrawText (40, 676, 2, COLOR_SUBTEXT, L"Touch screen: no driver.");
-  } else if (mTouchX >= 0) {
-    UnicodeSPrint (Line, sizeof (Line), L"Touch: %d, %d%s", mTouchX, mTouchY, mTouching ? L" (down)" : L"");
-    DrawText (40, 676, 2, COLOR_SUBTEXT, Line);
-  } else {
-    DrawText (40, 676, 2, COLOR_SUBTEXT, L"Touch: waiting (works once the panel is up, ~10 s after power on).");
-  }
-
-  // Touch marker (check of the touch mapping).
-  if (mTouchX >= 0) {
-    FillRect ((mTouchX >= 20) ? (UINTN)mTouchX - 20 : 0, (UINTN)mTouchY, 41, 3, COLOR_MARK);
-    FillRect ((UINTN)mTouchX, (mTouchY >= 20) ? (UINTN)mTouchY - 20 : 0, 3, 41, COLOR_MARK);
-  }
-
   mGop->Blt (mGop, (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)mFb, EfiBltBufferToVideo, 0, 0, 0, 0, mFbW, mFbH, 0);
 }
 
@@ -364,7 +207,7 @@ Overwritten (
 STATIC
 VOID
 SetStatus (
-  IN UINT32        Color,
+  IN UINT32        Color,     // kept for the call sites; one colour for messages
   IN CONST CHAR16  *Format,
   ...
   )
@@ -374,7 +217,6 @@ SetStatus (
   VA_START (Args, Format);
   UnicodeVSPrint (mStatus, sizeof (mStatus), Format, Args);
   VA_END (Args);
-  mStatusColor = Color;
 }
 
 // ---------------------------------------------------------------- actions
@@ -610,24 +452,6 @@ Activate (
 // ---------------------------------------------------------------- input
 
 STATIC
-INTN
-HitTest (
-  IN INTN  Lx,
-  IN INTN  Ly
-  )
-{
-  UINTN  Index;
-
-  for (Index = 0; Index < ActCount; Index++) {
-    if ((Lx >= (INTN)mButtons[Index].X) && (Lx < (INTN)(mButtons[Index].X + mButtons[Index].W)) &&
-        (Ly >= (INTN)mButtons[Index].Y) && (Ly < (INTN)(mButtons[Index].Y + mButtons[Index].H))) {
-      return (INTN)Index;
-    }
-  }
-  return -1;
-}
-
-STATIC
 VOID
 FindTouch (
   VOID
@@ -671,22 +495,22 @@ PollTouch (
   }
   Down = (State.ActiveButtons & EFI_ABSP_TouchActive) != 0;
   FbToLandscape ((UINTN)State.CurrentX, (UINTN)State.CurrentY, &Lx, &Ly);
-  mTouchX = Lx;
-  mTouchY = Ly;
+  mView.TouchX = Lx;
+  mView.TouchY = Ly;
   if (Down) {
-    if (!mTouching) {
-      mPressed = HitTest (Lx, Ly);
-      if ((mPressed >= 0) && (mPressed < ActRotate)) {
-        mFocus = (UINTN)mPressed;
+    if (!mView.Touching) {
+      mView.Pressed = MenuHitTest (Lx, Ly);
+      if ((mView.Pressed >= 0) && (mView.Pressed < ActRotate)) {
+        mView.Focus = (UINTN)mView.Pressed;
       }
-    } else if ((mPressed >= 0) && (HitTest (Lx, Ly) != mPressed)) {
-      mPressed = -1;           // slid off the button: cancel
+    } else if ((mView.Pressed >= 0) && (MenuHitTest (Lx, Ly) != mView.Pressed)) {
+      mView.Pressed = -1;      // slid off the button: cancel
     }
-  } else if (mTouching) {
-    *Released = (HitTest (Lx, Ly) == mPressed) ? mPressed : -1;
-    mPressed  = -1;
+  } else if (mView.Touching) {
+    *Released     = (MenuHitTest (Lx, Ly) == mView.Pressed) ? mView.Pressed : -1;
+    mView.Pressed = -1;
   }
-  mTouching = Down;
+  mView.Touching = Down;
   return TRUE;
 }
 
@@ -719,10 +543,24 @@ SwitchMenuMain (
   if ((mPortrait ? mFbH : mFbW) < LW || (mPortrait ? mFbW : mFbH) < LH) {
     return EFI_UNSUPPORTED;      // the layout needs 1280 x 720
   }
-  mFb = AllocateZeroPool (mFbW * mFbH * sizeof (UINT32));
-  if (mFb == NULL) {
+  mFb         = AllocateZeroPool (mFbW * mFbH * sizeof (UINT32));
+  mCanvas     = AllocatePool (LW * LH * sizeof (UINT32));
+  mBackground = AllocatePool (LW * LH * sizeof (UINT32));
+  if ((mFb == NULL) || (mCanvas == NULL)) {
     return EFI_OUT_OF_RESOURCES;
   }
+  if (mBackground != NULL) {
+    MenuRenderBackground (mBackground);
+  }
+  mView.Pressed   = -1;
+  mView.TouchX    = -1;
+  mView.TouchY    = -1;
+  mView.ShowTouch = TRUE;     // touch marker and coordinates while the mapping is checked
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+  mView.Version = L"R422H  -  UEFI  -  hekate chain";
+#else
+  mView.Version = L"R422  -  UEFI  -  coreboot chain";
+#endif
 
   Size = sizeof (mRotation);
   if (EFI_ERROR (gRT->GetVariable (L"SwitchMenuRotation", &mMenuVarGuid, NULL, &Size, &mRotation)) || (mRotation > 1)) {
@@ -748,16 +586,20 @@ SwitchMenuMain (
     if (Index == 0) {
       while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
         if ((Key.ScanCode == SCAN_UP) || (Key.ScanCode == SCAN_LEFT)) {
-          mFocus = (mFocus + ActRotate - 1) % ActRotate;
+          mView.Focus = (mView.Focus + ActRotate - 1) % ActRotate;
         } else if ((Key.ScanCode == SCAN_DOWN) || (Key.ScanCode == SCAN_RIGHT)) {
-          mFocus = (mFocus + 1) % ActRotate;
+          mView.Focus = (mView.Focus + 1) % ActRotate;
         } else if ((Key.UnicodeChar == CHAR_CARRIAGE_RETURN) || (Key.UnicodeChar == L' ')) {
-          Activate (mFocus);
+          Activate (mView.Focus);
         } else if (Key.ScanCode == SCAN_ESC) {
           // Leave the menu: BDS goes on with the normal boot order.
           ClearForText ();
           gBS->CloseEvent (Timer);
           FreePool (mFb);
+          FreePool (mCanvas);
+          if (mBackground != NULL) {
+            FreePool (mBackground);
+          }
           return EFI_SUCCESS;
         }
         Dirty = TRUE;

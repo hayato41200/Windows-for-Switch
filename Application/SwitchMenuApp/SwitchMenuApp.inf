@@ -11,7 +11,9 @@
 
 [Sources]
   SwitchMenu.c
-  Font.h
+  Draw.c
+  Draw.h
+  Assets.h
 
 [Packages]
   MdePkg/MdePkg.dec

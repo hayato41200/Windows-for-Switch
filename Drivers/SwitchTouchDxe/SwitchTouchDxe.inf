@@ -1,0 +1,34 @@
+# SwitchTouchDxe.inf: the Switch touch screen (STM FTM4 on I2C3) as
+# EFI_ABSOLUTE_POINTER_PROTOCOL, in GOP framebuffer coordinates (720 x 1280).
+# The panel is powered and set up by UsbPowerAuditDxe (R373); this driver only reads events.
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = SwitchTouchDxe
+  FILE_GUID                      = 5b1e94d2-07c8-4f3a-a6d1-2e8f40c71b35
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = SwitchTouchDxeInitialize
+
+[Sources.common]
+  SwitchTouch.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  UefiLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiAbsolutePointerProtocolGuid
+  gEfiDevicePathProtocolGuid
+
+[Depex]
+  TRUE

@@ -1258,7 +1258,17 @@ struct periph_clk_init periph_clk_init_table[] = {
 	{ PERIPH_ID_SDMMC2, CLOCK_ID_PERIPH },
 	{ PERIPH_ID_SDMMC3, CLOCK_ID_PERIPH },
 	{ PERIPH_ID_SDMMC4, CLOCK_ID_PERIPH },
+#ifndef SWITCH_BOOT_CHAIN_HEKATE
 	{ PERIPH_ID_PWM, CLOCK_ID_SFROM32KHZ },
+#else
+	/*
+	 * R419: hekate hands over a running backlight PWM on CLK_M / 3 (0xC0000004,
+	 * 25 kHz). Muxing it to the 32.768 kHz clock (0x80000004) here made the
+	 * backlight PWM ~43 Hz, a visible flicker until UsbPowerAuditDxe (R389) put
+	 * CLK_M back. Leave the PWM clock as the previous loader set it; R366 sets
+	 * CLK_M / 3 when it finds the PWM clock off.
+	 */
+#endif
 	{ PERIPH_ID_I2C1, CLOCK_ID_PERIPH },
 	{ PERIPH_ID_I2C2, CLOCK_ID_PERIPH },
 	{ PERIPH_ID_I2C3, CLOCK_ID_PERIPH },

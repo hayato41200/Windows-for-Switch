@@ -22,6 +22,7 @@
 #include <Library/DevicePathLib.h>
 #include <Library/HobLib.h>
 #include <Library/PcdLib.h>
+#include <Library/PrintLib.h>
 #include <Library/UefiBootManagerLib.h>
 #include <Library/UefiLib.h>
 #include <Protocol/DevicePath.h>
@@ -121,6 +122,28 @@ STATIC PLATFORM_USB_KEYBOARD mUsbKeyboard = {
   //
   // EFI_DEVICE_PATH_PROTOCOL End
   //
+  {
+    END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
+    DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
+  }
+};
+
+//
+// The side buttons (Drivers/SidebandButtonDxe): VOL+ Up, VOL- Down, power Enter
+// (held: Esc). Keep the GUID in sync with SIDEBAND_BUTTON_DEVICE_GUID there.
+//
+#pragma pack (1)
+typedef struct {
+  VENDOR_DEVICE_PATH       Vendor;
+  EFI_DEVICE_PATH_PROTOCOL End;
+} PLATFORM_SIDEBAND_BUTTONS;
+#pragma pack ()
+
+STATIC PLATFORM_SIDEBAND_BUTTONS mSidebandButtons = {
+  {
+    { HARDWARE_DEVICE_PATH, HW_VENDOR_DP, DP_NODE_LEN (VENDOR_DEVICE_PATH) },
+    { 0x8e2d6a14, 0x3b5f, 0x4c71, { 0x9a, 0x0e, 0x5d, 0x2c, 0x61, 0x7b, 0x48, 0xf3 } }
+  },
   {
     END_DEVICE_PATH_TYPE, END_ENTIRE_DEVICE_PATH_SUBTYPE,
     DP_NODE_LEN (EFI_DEVICE_PATH_PROTOCOL)
@@ -328,7 +351,7 @@ AddOutput (
 }
 
 STATIC
-VOID
+UINTN
 PlatformRegisterFvBootOption (
   CONST EFI_GUID                   *FileGuid,
   CHAR16                           *Description,
@@ -343,6 +366,7 @@ PlatformRegisterFvBootOption (
   MEDIA_FW_VOL_FILEPATH_DEVICE_PATH FileNode;
   EFI_LOADED_IMAGE_PROTOCOL         *LoadedImage;
   EFI_DEVICE_PATH_PROTOCOL          *DevicePath;
+  UINTN                             OptionNumber;
 
   Status = gBS->HandleProtocol (
                   gImageHandle,
@@ -384,11 +408,23 @@ PlatformRegisterFvBootOption (
   if (OptionIndex == -1) {
     Status = EfiBootManagerAddLoadOptionVariable (&NewOption, MAX_UINTN);
     ASSERT_EFI_ERROR (Status);
+    OptionNumber = EFI_ERROR (Status) ? LoadOptionNumberUnassigned : NewOption.OptionNumber;
+  } else {
+    OptionNumber = BootOptions[OptionIndex].OptionNumber;
   }
   EfiBootManagerFreeLoadOption (&NewOption);
   EfiBootManagerFreeLoadOptions (BootOptions, BootOptionCount);
+  return OptionNumber;
 }
 
+
+//
+// Application/SwitchMenuApp FILE_GUID, and its Boot#### number once registered.
+//
+STATIC CONST EFI_GUID mSwitchMenuAppFile = {
+  0xa7c3e815, 0x4d92, 0x4b6e, { 0x9f, 0x20, 0x63, 0xd1, 0xb8, 0x5e, 0x0c, 0x4a }
+};
+STATIC UINTN mSwitchMenuOption = LoadOptionNumberUnassigned;
 
 STATIC
 VOID
@@ -400,6 +436,7 @@ PlatformRegisterOptionsAndKeys (
   EFI_INPUT_KEY                Enter;
   EFI_INPUT_KEY                F2;
   EFI_INPUT_KEY                Esc;
+  EFI_INPUT_KEY                VolUp;
   EFI_BOOT_MANAGER_LOAD_OPTION BootOption;
 
   //
@@ -425,6 +462,27 @@ PlatformRegisterOptionsAndKeys (
   ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
   Status = EfiBootManagerAddKeyOptionVariable (
              NULL, (UINT16) BootOption.OptionNumber, 0, &Esc, NULL
+             );
+  ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
+
+  //
+  // VOL+ (SidebandButtonDxe sends it as Up, repeated while held) opens the
+  // touch menu (Application/SwitchMenuApp), registered as a hidden APP-category
+  // Boot#### that BDS never boots on its own. A USB keyboard's Up arrow during
+  // the wait does the same. Replace any older Up key option (R420H: UiApp).
+  //
+  VolUp.ScanCode    = SCAN_UP;
+  VolUp.UnicodeChar = CHAR_NULL;
+  mSwitchMenuOption = PlatformRegisterFvBootOption (
+                        &mSwitchMenuAppFile, L"Switch touch menu",
+                        LOAD_OPTION_ACTIVE | LOAD_OPTION_HIDDEN | LOAD_OPTION_CATEGORY_APP
+                        );
+  EfiBootManagerDeleteKeyOptionVariable (NULL, 0, &VolUp, NULL);
+  Status = EfiBootManagerAddKeyOptionVariable (
+             NULL,
+             (UINT16) ((mSwitchMenuOption != LoadOptionNumberUnassigned) ?
+                       mSwitchMenuOption : BootOption.OptionNumber),
+             0, &VolUp, NULL
              );
   ASSERT (Status == EFI_SUCCESS || Status == EFI_ALREADY_STARTED);
 }
@@ -497,6 +555,12 @@ PlatformBootManagerBeforeConsole (
     (EFI_DEVICE_PATH_PROTOCOL *)&mUsbKeyboard, NULL);
 
   //
+  // Add the side buttons (VOL+/VOL-/power) to ConIn.
+  //
+  EfiBootManagerUpdateConsoleVariable (ConIn,
+    (EFI_DEVICE_PATH_PROTOCOL *)&mSidebandButtons, NULL);
+
+  //
   // Add the hardcoded serial console device path to ConIn, ConOut, ErrOut.
   //
   ASSERT (FixedPcdGet8 (PcdDefaultTerminalType) == 4);
@@ -552,7 +616,7 @@ PlatformBootManagerAfterConsole (
       Print (VERSION_STRING_PREFIX L"%s\n",
         PcdGetPtr (PcdFirmwareVersionString));
     }
-    Print (L"Press ESCAPE for boot options ");
+    Print (L"Hold VOL+ (or press ESC) for boot options ");
   } else if (FirmwareVerLength > 0) {
     Status = gBS->HandleProtocol (gST->ConsoleOutHandle,
                     &gEfiGraphicsOutputProtocolGuid, (VOID **)&GraphicsOutput);
@@ -622,7 +686,7 @@ PlatformBootManagerWaitCallback (
   Status = BootLogoUpdateProgress (
              White.Pixel,
              Black.Pixel,
-             L"Press ESCAPE for boot options",
+             L"Hold VOL+ (or press ESC) for boot options",
              White.Pixel,
              (Timeout - TimeoutRemain) * 100 / Timeout,
              0
@@ -647,6 +711,21 @@ VOID EFIAPI PlatformBootManagerUnableToBoot(VOID)
   // BootManagerMenu doesn't contain the correct information when return status
   // is EFI_NOT_FOUND.
   //
+  //
+  // The touch menu first (it offers UEFI settings too), the stock menu after.
+  //
+  if (mSwitchMenuOption != LoadOptionNumberUnassigned) {
+    CHAR16                       OptionName[sizeof ("Boot####")];
+    EFI_BOOT_MANAGER_LOAD_OPTION SwitchMenu;
+
+    UnicodeSPrint (OptionName, sizeof (OptionName), L"Boot%04x", mSwitchMenuOption);
+    if (!EFI_ERROR (EfiBootManagerVariableToLoadOption (OptionName, &SwitchMenu))) {
+      for (;;) {
+        EfiBootManagerBoot (&SwitchMenu);
+      }
+    }
+  }
+
   Status = EfiBootManagerGetBootManagerMenu(&BootManagerMenu);
   if (EFI_ERROR(Status)) {
     return;

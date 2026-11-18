@@ -1,4 +1,4 @@
-# SidebandButtonDxe.inf: side-band buttons (power, volume) support.
+# SidebandButtonDxe.inf: side-band buttons (power, volume) as a UEFI keyboard (VOL+ Up, VOL- Down, power Enter / held Esc).
 
 [Defines]
   INF_VERSION                    = 0x00010005
@@ -25,6 +25,7 @@
   UefiBootServicesTableLib
   UefiDriverEntryPoint
   BaseMemoryLib
+  MemoryAllocationLib
   DebugLib
   CompilerIntrinsicsLib
   CacheMaintenanceLib
@@ -35,7 +36,7 @@
   DevicePathLib
 
 [Protocols]
-  gEfiDriverBindingProtocolGuid
+  gEfiDevicePathProtocolGuid
   gEfiSimpleTextInProtocolGuid
   gEfiSimpleTextInputExProtocolGuid
   gPmicProtocolGuid

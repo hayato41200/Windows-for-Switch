@@ -436,15 +436,68 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
             }
         }
 
+        // R408: built-in panel for switchdisplay.sys (ACPI\SWOA0E01), a WDDM
+        // display-only driver. coreboot sets up DSI-A and DC-A window A on the
+        // GOP framebuffer (0xDFB80000, UEFI "Display Reserved"). The
+        // framebuffer is NOT a resource here: R407 listed it first and Windows
+        // then did not boot (noise on the panel) even without the driver. DC-A
+        // and DSI-A are for the display power-off (screen off). No interrupt:
+        // R409 added the DC-A interrupt (GSIV 105) and Windows then stopped
+        // the display-only adapter right after start (problem 43, status
+        // 0xC00000E5) whatever the driver did, so vsync stays timer-paced.
+        Device (DISP)
+        {
+            Name (_HID, "SWOA0E01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x54200000, 0x00040000)   // DC-A
+                Memory32Fixed (ReadWrite, 0x54300000, 0x00040000)   // DSI-A
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
+        // R410: GM20B GPU for the switchgpu.sys test driver (ACPI\SWOA0F01),
+        // GPU bring-up stage A (power the GPU, read NV_PMC_BOOT_0). Order
+        // matters (the driver takes them by position): BAR0 (PRI), BAR1,
+        // MAX77621 VDD_GPU on I2C5 0x1C, MAX77620 on I2C5 0x3C (its GPIO6 is
+        // the VDD_GPU enable; PWRB uses the same chip, so Shared). No
+        // interrupt yet (stall SPI 157 / nonstall SPI 158 come with stage B).
+        // Without the driver nothing touches the GPU: its rail stays off.
+        Device (GPU0)
+        {
+            Name (_HID, "SWOA0F01")
+            Name (_UID, Zero)
+            Name (_CRS, ResourceTemplate ()
+            {
+                Memory32Fixed (ReadWrite, 0x57000000, 0x01000000)   // BAR0
+                Memory32Fixed (ReadWrite, 0x58000000, 0x01000000)   // BAR1
+                I2cSerialBusV2 (0x001C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Shared, )
+            })
+
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (0x0F)
+            }
+        }
+
         // R374: power button for switchpwrbtn.sys (ACPI\SWOA0601). The button
         // drives MAX77620 EN0; the driver polls ONOFFSTAT/ONOFFIRQ on I2C5.
+        // R411: 0x3C is Shared (was Exclusive) so switchgpu.sys can open the
+        // same MAX77620 for GPIO6 (VDD_GPU enable); with Exclusive here the
+        // GPU0 open failed with STATUS_DEVICE_BUSY.
         Device (PWRB)
         {
             Name (_HID, "SWOA0601")
             Name (_UID, Zero)
             Name (_CRS, ResourceTemplate ()
             {
-                I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
+                I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Shared, )
             })
 
             Method (_STA, 0, NotSerialized)

@@ -23,6 +23,8 @@
   BaseLib
   ReportStatusCodeLib
   UefiLib
+  PrintLib
+  UefiRuntimeServicesTableLib
   UefiBootServicesTableLib
   UefiDriverEntryPoint
   BaseMemoryLib
@@ -41,6 +43,13 @@
 
 [BuildOptions.AARCH64]
   GCC:*_*_*_CC_FLAGS = -Wno-unused-function -Wno-unused-variable
+
+[FixedPcd]
+  gArmTokenSpaceGuid.PcdSystemMemoryBase
+
+[Guids]
+  gEfiEventReadyToBootGuid
+  gEfiEventExitBootServicesGuid
 
 [Protocols]
   gTegra210ClockManagementProtocolGuid

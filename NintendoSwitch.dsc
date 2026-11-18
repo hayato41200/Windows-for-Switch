@@ -36,7 +36,12 @@
   GCC:*_*_AARCH64_DLINK_FLAGS = -z common-page-size=0x10000
 
 [BuildOptions.common]
+!ifdef SWITCH_HEKATE
+  # Boot chain: hekate (L4T launcher) -> BL31 -> bl33.bin (Tools/Bl33 stub + this FD), from winx.
+  GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-error=stringop-overflow -DSWITCH_BOOT_CHAIN_HEKATE=1
+!else
   GCC:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable -Wno-error=stringop-overflow
+!endif
   CLANG38:*_*_AARCH64_CC_FLAGS = -Wno-unused-variable -Wno-unused-command-line-argument -Wno-unused-but-set-variable
 
 ################################################################################
@@ -139,7 +144,12 @@
   # PlatformHookLib|MdeModulePkg/Library/BasePlatformHookLibNull/BasePlatformHookLibNull.inf
 
   # 8250 Serial
+!ifdef SWITCH_HEKATE
+  # hekate may have gated the UART clocks, and the 8250 lib pokes the registers blindly.
+  SerialPortLib|MdePkg/Library/BaseSerialPortLibNull/BaseSerialPortLibNull.inf
+!else
   SerialPortLib|NintendoSwitchPkg/Library/Tegra8250SerialPortLib/Tegra8250SerialPortLib.inf
+!endif
 
   # System Libraries
   EfiResetSystemLib|ArmPkg/Library/ArmPsciResetSystemLib/ArmPsciResetSystemLib.inf
@@ -308,7 +318,12 @@
 
   # Display
   # Simple FrameBuffer
+!ifdef SWITCH_HEKATE
+  # hekate's IPL framebuffer (bdk/memory_map.h IPL_FB_ADDRESS, 720x1280, kept on after hand-off).
+  gNintendoSwitchPkgTokenSpaceGuid.PcdMipiFrameBufferAddress|0xF5A00000
+!else
   gNintendoSwitchPkgTokenSpaceGuid.PcdMipiFrameBufferAddress|0xdfb80000
+!endif
   gNintendoSwitchPkgTokenSpaceGuid.PcdMipiFrameBufferWidth|720
   gNintendoSwitchPkgTokenSpaceGuid.PcdMipiFrameBufferHeight|1280
   gNintendoSwitchPkgTokenSpaceGuid.PcdMipiFrameBufferPixelBpp|32
@@ -386,6 +401,7 @@
 
   # Drivers
   NintendoSwitchPkg/Drivers/SidebandButtonDxe/SidebandButtonDxe.inf
+  NintendoSwitchPkg/Drivers/SwitchTouchDxe/SwitchTouchDxe.inf
   NintendoSwitchPkg/Drivers/ClockManagementDxe/ClockManagementDxe.inf
   NintendoSwitchPkg/Drivers/PmicDxe/PmicDxe.inf
   NintendoSwitchPkg/Drivers/SdMmcDxe/SdMmcDxe.inf
@@ -423,6 +439,7 @@
       NULL|MdeModulePkg/Library/BootManagerUiLib/BootManagerUiLib.inf
       NULL|MdeModulePkg/Library/BootMaintenanceManagerUiLib/BootMaintenanceManagerUiLib.inf
   }
+  NintendoSwitchPkg/Application/SwitchMenuApp/SwitchMenuApp.inf
 
   # Disk IO
   MdeModulePkg/Universal/Disk/DiskIoDxe/DiskIoDxe.inf

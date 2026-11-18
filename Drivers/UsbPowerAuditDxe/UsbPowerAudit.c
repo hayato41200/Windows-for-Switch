@@ -4716,6 +4716,404 @@ STATIC BOOLEAN R363ConfigureSink (VOID) {
   return TRUE;
 }
 
+// R424: USB-C DisplayPort Alt Mode, stage 1 (BM92T side only). Runs on the
+// sink path after R363ConfigureSink, i.e. when a power source is attached and
+// the data-role swap made the Switch DFP. It follows the L4T bm92txx state
+// machine (CTCaer switch-l4t-kernel-4.9 drivers/misc/bm92txx.c) by polling the
+// ALERT register instead of the ALERT# interrupt:
+//   Discover Identity -> (Nintendo dock 057E:2003) Enter Nintendo Alt Mode ->
+//   DP_ENTER_MODE (0x3131) -> DP Configure VDO (pin D for 2 lanes, as the L4T
+//   DT rohm,dp-lanes = <2>) + DP_CFG_AND_START_HPD (0x3636) ->
+//   dock device state, dock LED on, dock USB hub on.
+// The BM92T firmware drives the USB-C lane mux and the HPD line by itself
+// after 0x3636 (L4T has no mux driver). Nothing on the SoC display side
+// (SOR1/DPAUX1/DC-B) is touched here: that is stage 2/3. Other partners (a
+// USB-C hub with a charger) only get Discover Identity / SVIDs / DP modes read
+// and printed; no mode is entered for them (R424_GENERIC_DP_ENTER).
+#define R424_GENERIC_DP_ENTER   0
+#define BM_ALERT_STATUS         0x02
+#define BM_DP_ALERT_EN          0x19
+#define BM_INCOMING_VDM         0x50
+#define BM_OUTGOING_VDM         0x60
+#define BM_ALERT_CMD_DONE       (1U << 2)
+#define BM_ALERT_PLUGPULL       (1U << 3)
+#define BM_ALERT_DP_EVENT       (1U << 6)
+#define BM_ALERT_VDM_RECEIVED   (1U << 11)
+#define BM_CMD_SEND_VDM         0x1111U
+#define BM_CMD_ACCEPT_VDM       0x1616U
+#define BM_CMD_DP_ENTER_MODE    0x3131U
+#define BM_CMD_DP_CFG_START_HPD 0x3636U
+#define BM_DP_STATUS_PIN_CFG    (1U << 1)
+#define BM_DP_STATUS_SIGNAL_ON  (1U << 7)
+#define BM_DP_STATUS_INSERT     (1U << 14)
+#define BM_DP_STATUS_DP_EN      (1U << 15)
+#define R424_VDO_DP_UFP_D       (1U << 0)
+#define R424_VDO_DP_SUPPORT     (1U << 2)
+#define R424_VDO_DP_U_UFP_D     (1U << 1)
+#define R424_VDO_DP_RECEPTACLE  (1U << 6)
+#define R424_VDO_DP_PIN_C       (1U << 2)
+#define R424_VDO_DP_PIN_D       (1U << 3)
+#define R424_DP_LANES           2U
+// HPD from the USB-C side: pin HDMI_INT_DP_HPD (GPIO PCC1), L4T dp-display
+// nvidia,hpd-gpio = <&gpio 0xE1 ...>. Pinmux entry 103 (0x19C), GPIO port CC.
+#define R424_PINMUX_DP_HPD      0x19CU
+#define R424_HPD_BIT            (1U << 1)
+
+typedef enum {
+  R424_NOT_RUN = 0, R424_NOT_DFP, R424_DISC_ID, R424_NOT_DOCK, R424_ENTER_NIN,
+  R424_DP_ENTER, R424_DP_CAPS, R424_DP_CFG, R424_DOCK_STATE, R424_DOCK_LED,
+  R424_DOCK_HUB, R424_DONE
+} R424_STEP;
+
+STATIC R424_STEP mR424Step = R424_NOT_RUN;
+STATIC BOOLEAN mR424Failed;
+STATIC UINT16 mR424Vid, mR424Pid, mR424DpStatus;
+STATIC UINT8 mR424IdType;
+STATIC BOOLEAN mR424Hpd;
+
+STATIC CONST CHAR16 *R424StepName (R424_STEP Step) {
+  switch (Step) {
+    case R424_NOT_DFP:    return L"DATA-ROLE (not DFP)";
+    case R424_DISC_ID:    return L"DISCOVER-IDENTITY";
+    case R424_NOT_DOCK:   return L"PARTNER (not a Nintendo dock)";
+    case R424_ENTER_NIN:  return L"ENTER-NINTENDO-MODE";
+    case R424_DP_ENTER:   return L"DP-ENTER-MODE 0x3131";
+    case R424_DP_CAPS:    return L"DP-CAPABILITIES";
+    case R424_DP_CFG:     return L"DP-CONFIGURE+HPD 0x3636";
+    case R424_DOCK_STATE: return L"DOCK-STATE";
+    case R424_DOCK_LED:   return L"DOCK-LED";
+    case R424_DOCK_HUB:   return L"DOCK-USB-HUB";
+    case R424_DONE:       return L"DONE";
+    default:              return L"NOT-RUN";
+  }
+}
+
+// Write Len bytes (Buf[0] = register) to the BM92T in one I2C packet.
+// Header 3 words + up to 4 payload words fit the 8-word TX FIFO.
+STATIC BOOLEAN R424WriteBlock (CONST UINT8 *Buf, UINTN Len, UINT32 *Status) {
+  volatile UINT32 *B = (volatile UINT32 *)BASE_ADDR;
+  UINTN I;
+  UINT32 W = 0;
+  if (Len < 2 || Len > 16 || !R288BeginI2c ()) return FALSE;
+  B[TX_FIFO] = HDR0; B[TX_FIFO] = (UINT32)(Len - 1);
+  B[TX_FIFO] = BM_ADDR << 1;
+  for (I = 0; I < Len; ++I) {
+    W |= (UINT32)Buf[I] << (8 * (I % 4));
+    if ((I % 4) == 3 || I == Len - 1) { B[TX_FIFO] = W; W = 0; }
+  }
+  if (!R288WaitI2c (Status)) return FALSE;
+  B[INT_STATUS_REG] = *Status;
+  return TRUE;
+}
+
+STATIC VOID R424WaitNotBusy (VOID) {
+  UINT16 S1 = 0;
+  UINT32 S = 0;
+  UINTN I;
+  for (I = 0; I < 40; ++I) {
+    if (R288Read16 (BM_STATUS1, &S1, &S) && (S1 & BM_CMD_BUSY) == 0) return;
+    gBS->Stall (5000);
+  }
+}
+
+// Read ALERT once to drop stale alert bits before a new command.
+STATIC VOID R424DrainAlerts (VOID) {
+  UINT16 A = 0;
+  UINT32 S = 0;
+  R288Read16 (BM_ALERT_STATUS, &A, &S);
+}
+
+STATIC BOOLEAN R424SendCmd (UINT16 Cmd) {
+  UINT32 S = 0;
+  R424WaitNotBusy ();
+  if (!R288Write16 (BM_COMMAND, Cmd, &S)) {
+    Print (L"R424 command %04x write FAIL I2C=%08x\r\n", Cmd, S);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+// Poll ALERT (reading clears it) until one of Want is seen. Returns the OR of
+// all alert bits seen, 0 on timeout.
+STATIC UINT16 R424WaitAlert (UINT16 Want, UINTN TimeoutMs) {
+  UINT16 A = 0, Seen = 0;
+  UINT32 S = 0;
+  UINTN T;
+  for (T = 0; T < TimeoutMs; T += 10) {
+    if (R288Read16 (BM_ALERT_STATUS, &A, &S)) {
+      Seen |= A;
+      if ((Seen & Want) != 0) return Seen;
+    }
+    gBS->Stall (10000);
+  }
+  Print (L"R424 timeout after %u ms waiting for alert %04x (seen %04x)\r\n",
+         (UINT32)TimeoutMs, Want, Seen);
+  return 0;
+}
+
+STATIC VOID R424PrintVdm (CONST CHAR16 *Tag, CONST UINT8 *Vdm) {
+  UINTN I, N = (UINTN)Vdm[0] + 1;
+  if (N > 29) N = 29;
+  Print (L"R424 %s VDM:", Tag);
+  for (I = 0; I < N; ++I) Print (L" %02x", Vdm[I]);
+  Print (L"\r\n");
+}
+
+// Send one VDM (Msg[0] = OUTGOING_VDM, Msg[1] = length), wait for the
+// partner's reply, accept it and read it into Reply[29].
+STATIC BOOLEAN R424VdmExchange (CONST CHAR16 *Tag, CONST UINT8 *Msg, UINTN Len, UINT8 *Reply) {
+  UINT32 S = 0;
+  UINT16 A;
+  ZeroMem (Reply, 29);
+  R424DrainAlerts ();
+  R424WaitNotBusy ();
+  if (!R424WriteBlock (Msg, Len, &S)) {
+    Print (L"R424 %s: OUTGOING_VDM write FAIL I2C=%08x\r\n", Tag, S);
+    return FALSE;
+  }
+  if (!R424SendCmd (BM_CMD_SEND_VDM)) return FALSE;
+  A = R424WaitAlert (BM_ALERT_VDM_RECEIVED, 1500);
+  if ((A & BM_ALERT_VDM_RECEIVED) == 0) {
+    Print (L"R424 %s: no reply VDM\r\n", Tag);
+    return FALSE;
+  }
+  if (!R424SendCmd (BM_CMD_ACCEPT_VDM)) return FALSE;
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 1000);
+  if ((A & BM_ALERT_CMD_DONE) == 0) Print (L"R424 %s: ACCEPT_VDM not done; reading anyway\r\n", Tag);
+  if (!R363ReadBlock (BM_ADDR, BM_INCOMING_VDM, Reply, 29, &S)) {
+    Print (L"R424 %s: INCOMING_VDM read FAIL I2C=%08x\r\n", Tag, S);
+    return FALSE;
+  }
+  R424PrintVdm (Tag, Reply);
+  return TRUE;
+}
+
+STATIC VOID R424ReadHpd (UINT32 *Pinmux, UINT32 *Cnf, BOOLEAN *Hpd) {
+  volatile UINT32 *Pm = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *Gp = (volatile UINT32 *)(GPIO_BASE + GPIO_PCC_OFFSET);
+  *Pinmux = Pm[R424_PINMUX_DP_HPD / 4];
+  *Cnf = Gp[GPIO_CNF / 4];
+  *Hpd = (Gp[GPIO_IN / 4] & R424_HPD_BIT) != 0;
+}
+
+STATIC VOID R424PrintState (CONST CHAR16 *Tag) {
+  UINT16 S1 = 0, S2 = 0, Dp = 0;
+  UINT32 S = 0, Pm, Cnf;
+  BOOLEAN Hpd;
+  R288Read16 (BM_STATUS1, &S1, &S);
+  R288Read16 (BM_STATUS2, &S2, &S);
+  R288Read16 (BM_DP_STATUS, &Dp, &S);
+  R424ReadHpd (&Pm, &Cnf, &Hpd);
+  mR424DpStatus = Dp;
+  mR424Hpd = Hpd;
+  Print (L"R424 %s: S1=%04x (DR=%u lastcmd=%u) S2=%04x DP=%04x [DP_EN=%u INSERT=%u SIGNAL=%u PINCFG=%u] HPD(PCC1)=%u pinmux=%08x cnf=%02x\r\n",
+         Tag, S1, (S1 & BM_DR_MASK) >> BM_DR_SHIFT, (S1 >> 4) & 7U, S2, Dp,
+         (Dp & BM_DP_STATUS_DP_EN) != 0, (Dp & BM_DP_STATUS_INSERT) != 0,
+         (Dp & BM_DP_STATUS_SIGNAL_ON) != 0, (Dp & BM_DP_STATUS_PIN_CFG) != 0,
+         Hpd, Pm, Cnf & 0xFFU);
+}
+
+STATIC VOID R424Fail (R424_STEP Step) {
+  mR424Step = Step;
+  mR424Failed = TRUE;
+}
+
+// Generic partner: only read what it offers (SVIDs, DP modes).
+STATIC VOID R424ReadGenericModes (VOID) {
+  CONST UINT8 DiscSvid[6] = { BM_OUTGOING_VDM, 4, 0x02, 0x80, 0x00, 0xFF };
+  CONST UINT8 DiscMode[6] = { BM_OUTGOING_VDM, 4, 0x03, 0x80, 0x01, 0xFF };
+  UINT8 Vdm[29];
+  UINTN I;
+  if (!R424VdmExchange (L"DISCOVER-SVID", DiscSvid, sizeof (DiscSvid), Vdm)) return;
+  if (Vdm[1] == (0x40 | 0x02)) {
+    for (I = 0; I < ((UINTN)(Vdm[0] >= 4 ? Vdm[0] - 4 : 0) / 2) && I < 12; ++I)
+      Print (L"R424 SVID%u %04x\r\n", (UINT32)I, Vdm[5 + I * 2] | (Vdm[6 + I * 2] << 8));
+  }
+  if (!R424VdmExchange (L"DISCOVER-MODE-DP", DiscMode, sizeof (DiscMode), Vdm)) return;
+  if (Vdm[0] > 4 && Vdm[1] == (0x40 | 0x03) && Vdm[3] == 0x01 && Vdm[4] == 0xFF &&
+      (Vdm[5] & R424_VDO_DP_UFP_D) != 0 && (Vdm[5] & R424_VDO_DP_SUPPORT) != 0)
+    Print (L"R424 partner supports DP Alt Mode (UFP_D). Not entered (R424_GENERIC_DP_ENTER=0).\r\n");
+  else
+    Print (L"R424 partner reports no DP Alt Mode.\r\n");
+}
+
+STATIC VOID R424DpAltStage1 (VOID) {
+  CONST UINT8 DiscId[6]   = { BM_OUTGOING_VDM, 4, 0x01, 0x80, 0x00, 0xFF };
+  CONST UINT8 EnterNin[6] = { BM_OUTGOING_VDM, 4, 0x04, 0x81, 0x7E, 0x05 };
+  CONST UINT8 Query[10]   = { BM_OUTGOING_VDM, 8, 0x00, 0x00, 0x7E, 0x05, 0x00, 0x01, 0x16, 0x00 };
+  CONST UINT8 HubOn[10]   = { BM_OUTGOING_VDM, 8, 0x00, 0x00, 0x7E, 0x05, 0x01, 0x01, 0x20, 0x00 };
+  // LED: fade 64, time off 0, time on 0, duty 128 (L4T bm92t_usbhub_led_cfg).
+  CONST UINT8 Led[14]     = { BM_OUTGOING_VDM, 12, 0x00, 0x00, 0x7E, 0x05, 0x01, 0x01, 0x01, 0x00,
+                              64, 0, 0, 128 };
+  UINT8 Vdm[29], Caps[5], Cfg[6];
+  UINT16 S1 = 0, A;
+  UINT32 S = 0, W0, W2, Pm, Cnf;
+  UINT8 Pin;
+  UINTN I, Lanes = 0, Retry;
+  BOOLEAN Hpd, LastHpd;
+  UINT16 LastDp;
+
+  Print (L"\r\n---- R424 DP Alt Mode stage 1 (BM92T) ----\r\n");
+  R424PrintState (L"start");
+  if (!R288Read16 (BM_STATUS1, &S1, &S) || ((S1 & BM_DR_MASK) >> BM_DR_SHIFT) != BM_DR_DFP) {
+    Print (L"R424 the Switch is not DFP (S1=%04x); DP Alt Mode needs DFP. Skipped.\r\n", S1);
+    R424Fail (R424_NOT_DFP);
+    return;
+  }
+  // L4T writes DP_ALERT_EN = 0 unless rohm,dp-alerts-enable (not in the DT).
+  if (!R288Write16 (BM_DP_ALERT_EN, 0x0000, &S))
+    Print (L"R424 DP_ALERT_EN write FAIL I2C=%08x (continuing)\r\n", S);
+
+  mR424Step = R424_DISC_ID;
+  if (!R424VdmExchange (L"DISCOVER-ID", DiscId, sizeof (DiscId), Vdm) || Vdm[1] != (0x40 | 0x01) || Vdm[0] < 16) {
+    Print (L"R424 Discover Identity: no ACK (cmd byte %02x len %u)\r\n", Vdm[1], Vdm[0]);
+    R424Fail (R424_DISC_ID);
+    return;
+  }
+  W0 = R363Le32 (&Vdm[5]);     // ID header: VID 15:0, product type 29:27
+  W2 = R363Le32 (&Vdm[13]);    // product VDO: bcdDevice 15:0, PID 31:16
+  mR424Vid = (UINT16)(W0 & 0xFFFFU);
+  mR424IdType = (UINT8)((W0 >> 27) & 7U);
+  mR424Pid = (UINT16)(W2 >> 16);
+  Print (L"R424 partner VID=%04x PID=%04x type=%u (5=alternate mode adapter) bcd=%04x\r\n",
+         mR424Vid, mR424Pid, mR424IdType, W2 & 0xFFFFU);
+
+  if (!(mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U)) {
+    Print (L"R424 not a Nintendo dock: reading SVIDs/modes only.\r\n");
+    R424ReadGenericModes ();
+    mR424Step = R424_NOT_DOCK;
+    return;
+  }
+
+  mR424Step = R424_ENTER_NIN;
+  if (!R424VdmExchange (L"ENTER-NINTENDO", EnterNin, sizeof (EnterNin), Vdm) ||
+      Vdm[1] != (0x40 | 0x04) || Vdm[2] != 0x81 || Vdm[3] != 0x7E || Vdm[4] != 0x05) {
+    Print (L"R424 Enter Nintendo Alt Mode: not ACKed\r\n");
+    R424Fail (R424_ENTER_NIN);
+    return;
+  }
+  Print (L"R424 Nintendo Alt Mode entered.\r\n");
+
+  mR424Step = R424_DP_ENTER;
+  R424DrainAlerts ();
+  if (!R424SendCmd (BM_CMD_DP_ENTER_MODE)) { R424Fail (R424_DP_ENTER); return; }
+  gBS->Stall (100000);
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 3000);
+  R288Read16 (BM_STATUS1, &S1, &S);
+  Print (L"R424 DP_ENTER_MODE: alerts=%04x S1=%04x lastcmd=%u\r\n", A, S1, (S1 >> 4) & 7U);
+  if ((A & BM_ALERT_CMD_DONE) == 0) { R424Fail (R424_DP_ENTER); return; }
+
+  mR424Step = R424_DP_CAPS;
+  if (!R363ReadBlock (BM_ADDR, BM_INCOMING_VDM, Caps, sizeof (Caps), &S)) {
+    Print (L"R424 DP capabilities read FAIL I2C=%08x\r\n", S);
+    R424Fail (R424_DP_CAPS);
+    return;
+  }
+  Print (L"R424 DP caps: len=%u %02x %02x %02x %02x (plug pins %02x, receptacle pins %02x)\r\n",
+         Caps[0], Caps[1], Caps[2], Caps[3], Caps[4], Caps[2], Caps[3]);
+  // L4T bm92t_handle_dp_config_and_hpd: primary pin D for 2 lanes, then C.
+  // The dock reports a plug but uses the receptacle field (it ignores it).
+  Cfg[0] = BM_OUTGOING_VDM; Cfg[1] = 4;
+  Cfg[2] = R424_VDO_DP_SUPPORT | R424_VDO_DP_U_UFP_D;
+  Cfg[3] = 0; Cfg[4] = 0; Cfg[5] = 0;
+  Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_C : R424_VDO_DP_PIN_D;
+  for (I = 0; I < 2; ++I) {
+    if ((Caps[3] & Pin) != 0) {
+      Cfg[4] = Pin;
+      Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+      break;
+    }
+    Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_D : R424_VDO_DP_PIN_C;
+  }
+  if (Caps[0] != 4 || Lanes == 0) {
+    Print (L"R424 no usable DP pin assignment (C/D)\r\n");
+    R424Fail (R424_DP_CAPS);
+    return;
+  }
+  Print (L"R424 DP configure: pin %c (%u lanes on the cable, SOR1 uses %u)\r\n",
+         (Pin == R424_VDO_DP_PIN_C) ? L'C' : L'D', (UINT32)Lanes,
+         (UINT32)(Lanes > R424_DP_LANES ? R424_DP_LANES : Lanes));
+
+  mR424Step = R424_DP_CFG;
+  R424DrainAlerts ();
+  R424WaitNotBusy ();
+  if (!R424WriteBlock (Cfg, sizeof (Cfg), &S)) {
+    Print (L"R424 DP configure VDO write FAIL I2C=%08x\r\n", S);
+    R424Fail (R424_DP_CFG);
+    return;
+  }
+  if (!R424SendCmd (BM_CMD_DP_CFG_START_HPD)) { R424Fail (R424_DP_CFG); return; }
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 3000);
+  R288Read16 (BM_STATUS1, &S1, &S);
+  Print (L"R424 DP_CFG_AND_START_HPD: alerts=%04x S1=%04x lastcmd=%u (0=complete 2=aborted 4=invalid 6=rejected 7=terminated)\r\n",
+         A, S1, (S1 >> 4) & 7U);
+  if ((A & BM_ALERT_CMD_DONE) == 0 || (S1 & BM_INSERT) == 0 || ((S1 >> 4) & 7U) != 0) {
+    R424Fail (R424_DP_CFG);
+    R424PrintState (L"after DP configure");
+    return;
+  }
+  R424PrintState (L"DP configured");
+
+  // Nintendo dock VDMs (failures here are reported but do not undo DP).
+  mR424Step = R424_DOCK_STATE;
+  if (R424VdmExchange (L"DOCK-STATE", Query, sizeof (Query), Vdm) && Vdm[6] == 2 && Vdm[7] == 0x17)
+    Print (L"R424 dock state: %02x %02x %02x %02x%s\r\n", Vdm[9], Vdm[10], Vdm[11], Vdm[12],
+           (Vdm[11] & 0x02) ? L" (old dock FW: L4T switches USB to device mode)" : L"");
+  else
+    Print (L"R424 dock state: no valid reply\r\n");
+
+  mR424Step = R424_DOCK_LED;
+  if (!R424VdmExchange (L"DOCK-LED", Led, sizeof (Led), Vdm)) Print (L"R424 dock LED: no reply\r\n");
+
+  mR424Step = R424_DOCK_HUB;
+  gBS->Stall (500000);   // L4T: wait for the hub to power up
+  for (Retry = 0; Retry < 10; ++Retry) {
+    if (!R424VdmExchange (L"DOCK-HUB", HubOn, sizeof (HubOn), Vdm)) {
+      Print (L"R424 dock USB hub enable: no reply\r\n");
+      break;
+    }
+    if (Vdm[6] == 2 && Vdm[7] == 0x21 && (Vdm[5] & 1U) != 0) {
+      Print (L"R424 dock hub busy, retry %u\r\n", (UINT32)(Retry + 1));
+      gBS->Stall (250000);
+      continue;
+    }
+    Print ((Vdm[6] == 2 && Vdm[7] == 0x21) ? L"R424 dock USB hub enabled.\r\n" :
+                                             L"R424 dock USB hub: unexpected reply\r\n");
+    break;
+  }
+  mR424Step = R424_DONE;
+
+  // Watch DP status / HPD for 10 s so a TV switched on or an HDMI cable
+  // plugged now shows up; print only changes.
+  Print (L"R424 watching DP status and HPD for 10 s (switch the TV on / plug HDMI now)...\r\n");
+  R424PrintState (L"t=0");
+  LastDp = mR424DpStatus;
+  LastHpd = mR424Hpd;
+  for (I = 1; I <= 20; ++I) {
+    gBS->Stall (500000);
+    if (R288Read16 (BM_DP_STATUS, &mR424DpStatus, &S)) {
+      R424ReadHpd (&Pm, &Cnf, &Hpd);
+      mR424Hpd = Hpd;
+      if (mR424DpStatus != LastDp || Hpd != LastHpd) {
+        Print (L"R424 t=%u.%us DP=%04x SIGNAL=%u HPD=%u\r\n", (UINT32)(I / 2), (UINT32)((I % 2) * 5),
+               mR424DpStatus, (mR424DpStatus & BM_DP_STATUS_SIGNAL_ON) != 0, Hpd);
+        LastDp = mR424DpStatus;
+        LastHpd = Hpd;
+      }
+    }
+  }
+  R424PrintState (L"end");
+}
+
+STATIC VOID R424PrintSummary (VOID) {
+  if (mR424Step == R424_NOT_RUN) return;
+  Print (L"R424 DP-ALT: %s at %s; partner %04x:%04x type %u; DP=%04x (DP_EN=%u SIGNAL=%u) HPD=%u\r\n",
+         mR424Failed ? L"STOPPED" : (mR424Step == R424_DONE ? L"DONE" : L"READ-ONLY"),
+         R424StepName (mR424Step), mR424Vid, mR424Pid, mR424IdType, mR424DpStatus,
+         (mR424DpStatus & BM_DP_STATUS_DP_EN) != 0, (mR424DpStatus & BM_DP_STATUS_SIGNAL_ON) != 0,
+         mR424Hpd);
+}
+
 // R412: hekate (L4T launcher) chain. coreboot's clock_init() runs init_pllu()
 // and init_utmip_pll() on every boot (soc/nvidia/tegra210/clock.c); hekate
 // enables PLLU only for its own USB gadget mode and never programs the UTMIP
@@ -4901,8 +5299,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R423H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R424H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
+  Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
@@ -5027,6 +5426,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
       goto R288Cleanup;
     }
     mR363SinkMode = TRUE;
+    R424DpAltStage1 ();
     goto R363PathSetup;
   }
   if (!HostGatePassed) {
@@ -5177,6 +5577,7 @@ R288Cleanup:
          mR412PlluAtStart, mR412PlluAfter,
          mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"",
          mR413PadctlReleased ? L" PADCTL reset released" : L"");
+  R424PrintSummary ();
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

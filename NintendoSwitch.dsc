@@ -371,15 +371,7 @@
   MdeModulePkg/Universal/CapsuleRuntimeDxe/CapsuleRuntimeDxe.inf
   MdeModulePkg/Universal/MonotonicCounterRuntimeDxe/MonotonicCounterRuntimeDxe.inf
   MdeModulePkg/Universal/Variable/RuntimeDxe/VariableRuntimeDxe.inf
-!ifdef SWITCH_HEKATE
-  # R416: PSCI reset with a backlight-off marker (switchroot bl31 turns SYSTEM_RESET into reboot-to-payload).
-  EmbeddedPkg/ResetRuntimeDxe/ResetRuntimeDxe.inf {
-    <LibraryClasses>
-      EfiResetSystemLib|NintendoSwitchPkg/Library/SwitchPsciResetSystemLib/SwitchPsciResetSystemLib.inf
-  }
-!else
   EmbeddedPkg/ResetRuntimeDxe/ResetRuntimeDxe.inf
-!endif
   EmbeddedPkg/MetronomeDxe/MetronomeDxe.inf
   EmbeddedPkg/RealTimeClockRuntimeDxe/RealTimeClockRuntimeDxe.inf {
     <LibraryClasses>

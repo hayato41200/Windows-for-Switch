@@ -555,7 +555,7 @@ SwitchMenuMain (
   mView.Pressed   = -1;
   mView.TouchX    = -1;
   mView.TouchY    = -1;
-  mView.ShowTouch = TRUE;     // touch marker and coordinates while the mapping is checked
+  mView.ShowTouch = FALSE;    // R423: the touch marker was for checking the mapping (R421H/R422H)
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
   mView.Version = L"R422H  -  UEFI  -  hekate chain";
 #else

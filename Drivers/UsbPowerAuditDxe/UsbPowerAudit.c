@@ -4776,6 +4776,7 @@ STATIC UINT16 mR424Vid, mR424Pid, mR424DpStatus;
 STATIC UINT8 mR424IdType;
 STATIC BOOLEAN mR424Hpd;
 STATIC BOOLEAN mR424Generic;
+STATIC BOOLEAN mR432StdDp;
 
 STATIC CONST CHAR16 *R424StepName (R424_STEP Step) {
   switch (Step) {
@@ -5993,6 +5994,8 @@ STATIC VOID R429DpVideoStage3 (VOID) {
       R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
       gBS->Stall (1000000);
       V = R429DcRd (R429_DC_INT_STATUS);
+      if (Sec == 1)
+        Print (L"R432 SOR DP_MN0=%08x MN1=%08x\r\n", R427Rd (0x5A), R427Rd (0x5B));
       if (R427DpcdR (0x200, Ls, 6))
         Print (L"R431 t=%2us DC INT=%08x TEST=%08x DPCD200 %02x %02x %02x %02x %02x %02x\r\n",
                (UINT32)Sec, V, R427Rd (R429_SOR_TEST), Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
@@ -6050,7 +6053,22 @@ STATIC VOID R424DpAltStage1 (VOID) {
   Print (L"R424 partner VID=%04x PID=%04x type=%u (5=alternate mode adapter) bcd=%04x\r\n",
          mR424Vid, mR424Pid, mR424IdType, W2 & 0xFFFFU);
 
-  if (!(mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U)) {
+  // R432: a third-party hub that answers as the Nintendo dock (057E:2003) gets
+  // no HDMI out in Nintendo mode (R431H: stream in sync, TV no signal) but works
+  // with a MacBook. Prefer the standard DP SVID (FF01) when the partner offers it.
+  if (mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U) {
+    Print (L"R432 partner answers as Nintendo dock: trying the standard DP SVID first (like a PC).\r\n");
+    if (R424ReadGenericModes ()) {
+      mR424Generic = TRUE;
+      mR432StdDp = TRUE;
+      Print (L"R432 standard DP Alt Mode offered: entering DP mode without Nintendo mode.\r\n");
+    } else {
+      Print (L"R432 no standard DP mode offered: using the Nintendo path.\r\n");
+    }
+  }
+  if (mR432StdDp) {
+    // standard DP chosen above
+  } else if (!(mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U)) {
     Print (L"R424 not a Nintendo dock: reading SVIDs/modes.\r\n");
     mR424Step = R424_NOT_DOCK;
     if (!R424ReadGenericModes ()) return;
@@ -6402,7 +6420,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R431H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R432H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6411,7 +6429,8 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
   Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
   Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
-  Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
+  Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
+  Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

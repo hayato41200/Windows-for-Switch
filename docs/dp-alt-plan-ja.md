@@ -82,6 +82,12 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 - SOR1: coreboot の tegra_dc_dp_calc_config を移植して、TU サイズ、active count/frac、watermark、hblank/vblank のシンボル数を決める。STATE1 は head 1、DP-A、24 bpp、同期は正極性。HEAD_STATE1〜5 は head 1 用(+1 の位置)。
 - つなぎ方は coreboot の tegra_dc_sor_attach と同じ順番。DC の WIN_OPTIONS は SOR1_ENABLE(bit 26)。
 - 成功の目安: `R429 SOR1 head AWAKE`、テレビに赤 → 緑 → 青 → 白が 2 秒ずつ出て、最後は白のまま残る(色の並びは BG レジスタの形式しだいで入れ替わるかもしれない)。
+
+**実機の結果(2026-11-19):**
+- R429H: テレビは無信号。disp2 のクロック元を 0x140 に書いていた(正しくは 0x13C)。
+- R430H / R431H: フレームは出ており(INT_STATUS 6)、DPCD 0x200〜0x205 = `01 00 77 00 81 01`(映像に同期)が 20 秒続いたが、テレビは無信号。ハブ(純正ドックではない、DP Alt 対応の USB-C ハブ。MacBook では映る)は 057E:2003 を名乗る。branch OUI 000000、port caps 0B(HDMI)。
+- R432H: ハブは SVID FF01 も持つので、ふつうの DP Alt Mode(ピン D)で入るようにした。それでも無信号。
+- **R433H: テレビに白が出た(テレビの表示は「HDMI 映像 720p」)。** 原因は DC の中の分周。SOR を使うときは DC のクロック = 画素クロックでないといけない(シフトクロック分周 1)。PLLP / 5.5 をやめ、PLLD2 を Linux の表どおり 74.25 MHz(M1 N30 SDM 0x0E00、P16 = hw 11、VCO 1188 MHz)にして、disp2 = pll_d2_out0(mux 5、1:1)。測ったフレームの速さは 60.0 fps。**段階 3-1 完了。**
 2. Windows: switchdisplay の 2 つ目の出力(2 つ目の VidPN source/target)。モードは EDID から。最初は複製(内蔵と同じ 1280x720)で始め、拡張はそのあと。ホットプラグは BM92T の ALERT と HPD から。
 3. Windows の BM92T: 今は switchbattery v4 が STATUS1 を読み、DR_SWAP をする。DP Alt Mode の状態(ドックの抜き差し)を扱うのは 1 つのドライバーにまとめる必要がある(ALERT を読むと消えるため、2 つのドライバーが読むと取り合いになる)。
 

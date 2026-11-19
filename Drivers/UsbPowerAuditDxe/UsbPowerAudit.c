@@ -5716,7 +5716,7 @@ STATIC VOID R427PrintSummary (VOID) {
 #define R429_VFP   5U
 #define R429_VSYNC 5U
 #define R429_VBP   20U
-#define R429_PCLK  74181818U   // 408 MHz / 5.5
+#define R429_PCLK  74250000U   // R433: PLLD2 594/8 = 74.25 MHz, shift divider 1
 
 STATIC CONST CHAR16 *mR429Step = NULL;
 STATIC BOOLEAN mR429Ok;
@@ -5820,6 +5820,68 @@ STATIC BOOLEAN R429CalcTu (UINT32 LinkRate, UINT32 *Tu, UINT32 *Act, UINT32 *Fra
   return TRUE;
 }
 
+//
+// R433: with SOR outputs the DC clock must be the pixel clock itself (shift
+// divider 1, as coreboot and upstream Linux do); R429-R432 used PLLP / 5.5 and
+// the hub never produced HDMI. PLLD2 (the L4T DC-B parent, pll_d2_out0 = 1:1)
+// is set from the Linux tegra210 table: 38.4 MHz, M=1 N=30 SDM din 0x0E00 ->
+// VCO 1188 MHz, P=16 (hw 11) -> 74.25 MHz.
+//
+#define R433_PLLD2_BASE  0x4B8U
+#define R433_PLLD2_MISC0 0x4BCU
+#define R433_PLLD2_MISC1 0x570U
+#define R433_PLLD2_MISC2 0x574U
+#define R433_PLLD2_MISC3 0x578U
+STATIC BOOLEAN mR433PllD2;
+STATIC UINT32 mR433Fps10;
+
+STATIC BOOLEAN R433PllD2 (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  UINT32 B = Car[R433_PLLD2_BASE / 4];
+  UINTN T;
+  Print (L"R433 PLLD2 before: BASE=%08x MISC0=%08x MISC1=%08x MISC3=%08x\r\n", B, Car[R433_PLLD2_MISC0 / 4],
+         Car[R433_PLLD2_MISC1 / 4], Car[R433_PLLD2_MISC3 / 4]);
+  if ((B & R427_PLL_ENABLE) != 0) {
+    Car[R433_PLLD2_BASE / 4] = B & ~R427_PLL_ENABLE;
+    gBS->Stall (10);
+    B = Car[R433_PLLD2_BASE / 4];
+  }
+  Car[R433_PLLD2_BASE / 4] = (B | R427_PLL_IDDQ) & ~(R427_PLL_LOCK_OVERRIDE | R427_PLL_ENABLE);
+  Car[R433_PLLD2_MISC0 / 4] = 0x40000020U;
+  Car[R433_PLLD2_MISC1 / 4] = 0x90000000U;       // default 0x10000000 + SDM enable
+  Car[R433_PLLD2_MISC2 / 4] = 0;
+  Car[R433_PLLD2_MISC3 / 4] = 0x00000E00U;       // SDM din
+  gBS->Stall (1);
+  B = R427_PLL_IDDQ | (11U << 19) | (30U << 8) | 1U;
+  Car[R433_PLLD2_BASE / 4] = B;
+  gBS->Stall (2);
+  B &= ~R427_PLL_IDDQ;
+  Car[R433_PLLD2_BASE / 4] = B;
+  gBS->Stall (5);
+  Car[R433_PLLD2_BASE / 4] = B | R427_PLL_ENABLE;
+  for (T = 0; T < 1000 && (Car[R433_PLLD2_BASE / 4] & R427_PLL_LOCK) == 0; ++T) gBS->Stall (10);
+  B = Car[R433_PLLD2_BASE / 4];
+  Print (L"R433 PLLD2 after: BASE=%08x (enable=%u lock=%u after %u us) MISC1=%08x MISC3=%08x\r\n",
+         B, (B & R427_PLL_ENABLE) != 0, (B & R427_PLL_LOCK) != 0, (UINT32)(T * 10),
+         Car[R433_PLLD2_MISC1 / 4], Car[R433_PLLD2_MISC3 / 4]);
+  return (B & R427_PLL_LOCK) != 0;
+}
+
+// Count DC-B frame-end events for 500 ms; returns frames per second x 10.
+STATIC UINT32 R433MeasureFps (VOID) {
+  UINT32 Frames = 0;
+  UINTN T;
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  for (T = 0; T < 5000; ++T) {
+    gBS->Stall (100);
+    if ((R429DcRd (R429_DC_INT_STATUS) & 2U) != 0) {
+      R429DcWr (R429_DC_INT_STATUS, 2U);
+      ++Frames;
+    }
+  }
+  return Frames * 20;
+}
+
 STATIC BOOLEAN R429PowerDcb (VOID) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
@@ -5830,7 +5892,10 @@ STATIC BOOLEAN R429PowerDcb (VOID) {
   Print (L"R429 before: PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
          Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
          Car[R429_CAR_RST_DEV_L / 4]);
-  Car[R429_CAR_SRC_DISP2 / 4] = 0;                  // parent pll_p (408 MHz)
+  mR433PllD2 = R433PllD2 ();
+  // disp2 mux (tegra210 mux_pllp_plld_plld2_clkm): 0 pll_p, 5 pll_d2_out0, 6 clk_m
+  Car[R429_CAR_SRC_DISP2 / 4] = mR433PllD2 ? (5U << 29) : 0;
+  if (!mR433PllD2) Print (L"R433 PLLD2 did not lock: falling back to PLLP / 5.5\r\n");
   Car[R429_CAR_CLK_ENB_L_SET / 4] = R429_L_DISP2;
   Car[R429_CAR_RST_DEV_L_SET / 4] = R429_L_DISP2;
   gBS->Stall (10);
@@ -5896,7 +5961,7 @@ STATIC VOID R429DpVideoStage3 (VOID) {
   R429DcWr (R429_DC_BACK_PORCH, (R429_VBP << 16) | R429_HBP);
   R429DcWr (R429_DC_ACTIVE, (R429_VACT << 16) | R429_HACT);
   R429DcWr (R429_DC_FRONT_PORCH, (R429_VFP << 16) | R429_HFP);
-  R429DcWr (R429_DC_CLOCK_CTRL, 9);                 // shift clock / 5.5, PCD1
+  R429DcWr (R429_DC_CLOCK_CTRL, mR433PllD2 ? 0U : 9U);  // R433: shift divider 1 with PLLD2
   R429DcWr (R429_DC_BG_COLOR, Colors[0]);
   R429DcWr (R429_DC_STATE_CTRL, (1U << 8) | (7U << 9));
   R429DcWr (R429_DC_STATE_CTRL, 1U | (7U << 1));
@@ -5961,6 +6026,9 @@ STATIC VOID R429DpVideoStage3 (VOID) {
   Print (L"R429 SOR1 head %s (TEST=%08x)\r\n", mR429Ok ? L"AWAKE: attached to DC-B" : L"did NOT wake", mR429Test);
   R429SorDump (L"attached");
   R429DcDump (L"attached");
+  mR433Fps10 = R433MeasureFps ();
+  Print (L"R433 DC-B measured about %u.%u frames/s (want 60.0; clock %s)\r\n", mR433Fps10 / 10, mR433Fps10 % 10,
+         mR433PllD2 ? L"PLLD2 74.25 MHz" : L"PLLP/5.5");
   R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
   gBS->Stall (100000);
   V = R429DcRd (R429_DC_INT_STATUS);
@@ -6420,7 +6488,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R432H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R433H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6430,7 +6498,8 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
   Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
-  Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
+  Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
+  Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

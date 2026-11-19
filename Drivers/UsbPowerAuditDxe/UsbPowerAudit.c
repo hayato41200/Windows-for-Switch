@@ -5975,6 +5975,29 @@ STATIC VOID R429DpVideoStage3 (VOID) {
     Print (L"R429 TV should now show %s (BG=%08x)\r\n", Names[I], Colors[I]);
     if (I < 3) gBS->Stall (2000000);
   }
+  // R431: identify the dock's DP->HDMI converter and watch the stream for 20 s
+  {
+    UINT8 Br[12], Dp[4];
+    UINTN Sec;
+    if (R427DpcdR (0x500, Br, 12))
+      Print (L"R431 branch OUI %02x%02x%02x id '%c%c%c%c%c%c' hw %02x fw %02x.%02x\r\n", Br[0], Br[1], Br[2],
+             Br[3] >= 0x20 && Br[3] < 0x7F ? Br[3] : '.', Br[4] >= 0x20 && Br[4] < 0x7F ? Br[4] : '.',
+             Br[5] >= 0x20 && Br[5] < 0x7F ? Br[5] : '.', Br[6] >= 0x20 && Br[6] < 0x7F ? Br[6] : '.',
+             Br[7] >= 0x20 && Br[7] < 0x7F ? Br[7] : '.', Br[8] >= 0x20 && Br[8] < 0x7F ? Br[8] : '.',
+             Br[9], Br[10], Br[11]);
+    if (R427DpcdR (0x080, Dp, 4))
+      Print (L"R431 downstream port 0 caps %02x %02x %02x %02x (DPCD 0x005=%02x 0x007=%02x)\r\n",
+             Dp[0], Dp[1], Dp[2], Dp[3], mR426Dpcd[5], mR426Dpcd[7]);
+    Print (L"R431 holding white for 20 s - please watch the TV now\r\n");
+    for (Sec = 1; Sec <= 20; ++Sec) {
+      R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+      gBS->Stall (1000000);
+      V = R429DcRd (R429_DC_INT_STATUS);
+      if (R427DpcdR (0x200, Ls, 6))
+        Print (L"R431 t=%2us DC INT=%08x TEST=%08x DPCD200 %02x %02x %02x %02x %02x %02x\r\n",
+               (UINT32)Sec, V, R427Rd (R429_SOR_TEST), Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
+    }
+  }
   if (R427DpcdR (0x200, Ls, 6))
     Print (L"R430 DPCD 200..205 at end: sink count %02x irq %02x lanes %02x %02x align %02x sink status %02x (01 = stream in sync)\r\n",
            Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
@@ -6379,7 +6402,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R430H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R431H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6387,7 +6410,8 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
   Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
   Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
-  Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
+  Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
+  Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

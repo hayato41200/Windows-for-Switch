@@ -49,7 +49,18 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 
 ### 段階 2: DPAUX1 と SOR1(UEFI)
 **段階 2a(R426 / R426H):** 下の 1〜3。R424 の段階 1 が DONE のときだけ、続けて実行する。SOR のパーティションがオンであることを確かめる(DSI もここにあるので、内蔵パネルが動いていればオンのはず)。次に CAR の sor_safe(Y bit 30)と dpaux1(Y bit 15)をオンにし、dpaux1 をリセットし直す。そのあと prod、AUX モード、パッドの電源、HPD_CONFIG を設定し、AUXSTAT の bit 28 で HPD を読む。続けて DPCD の 0x000〜0x00F と 0x200〜0x205、EDID のブロック 0 を読む。成功の目安は、まとめの行が `R426 DPAUX: DONE at DONE` になり、テレビの名前と推奨の解像度が出ること。
-**段階 2b:** 下の 4〜5(SOR1 とリンクトレーニング)。
+**実機の結果(2026-11-19、R426H):** HPD(DPAUX)=1。DPCD は 12 14 E2 01 01 05 …(rev 1.2、最大 5.4 Gbps、2 レーン、enhanced framing、downstream port あり)、sink count 1。EDID は SHARP "SHARP HDMI"、1920x1080@60(148.5 MHz)、checksum OK。段階 2a は通った。
+**段階 2b(R427 / R427H):** 下の 4〜5(SOR1 とリンクトレーニング)。R426 が DONE のときだけ、続けて実行する。手順は次のとおり。
+- PLLDP を 270 MHz にする(M=1、N=28、P=4、SDM 0xF400)。
+- sor1_out を sor_safe にして、sor1 のゲートを開け、リセットし直す。
+- CLK_CNTRL(DIFF_DPCLK、リンク速度)を設定し、DT の prod_c_dp を当てる。
+- 終端の校正をして、パッドの電源を手順 1〜5 で入れる。
+- パッドのレーン 2 と 1 を起こし(xbar)、レーン数 2 にして、レーンシーケンサーで起動する。
+- DPCD に D0、8b/10b、リンク速度、レーン数を書く。
+- LINKCTL を有効にし、XBAR を設定して、sor1_out を sor1_pad_clkout に切り替える。
+- プリチャージのあと、TPS1 で CR、TPS2 で EQ を通す。駆動レベルは DT の lt-data(pc2 = 0)を使う。
+
+速度は 2.7 Gbps を先に試し、だめなら 1.62 Gbps で試す。成功の目安は、`R427 DP-LINK: DONE` が出て、レーンの状態が 0x77 / align 0x01 になること。
 
 1. DPAUX1: クロックとリセット(CAR)、パッドの電源(`DPAUX_HYBRID_SPARE`)、prod の値、DP のパッドモード。HPD を `DPAUX_DP_AUXSTAT` bit 28 で読む(段階 1 の PCC1 と一致すること)。
 2. AUX で DPCD を読む(0x000〜0x00F: DPCD rev、最大リンク速度、レーン数)。ドックの DP→HDMI 変換チップが答えるはず。

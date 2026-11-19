@@ -5228,6 +5228,404 @@ STATIC VOID R426PrintSummary (VOID) {
          mR426EdidOk ? mR426Mfg : L"-", mR426Name, mR426W, mR426H, mR426Hz);
 }
 
+// R427: USB-C DisplayPort Alt Mode, stage 2b (SOR1 + DP link training, no
+// video yet). Runs after a successful R426 (HPD, DPCD and EDID read). Follows
+// L4T drivers/video/tegra/dc/{dp.c,sor.c,dp_lt.c} (tegra_dc_dp_enable ->
+// tegra_dp_prepare_pad -> tegra_dc_sor_enable_dp -> link training) and the
+// L4T running DT for sor1:
+//   PLLDP 270 MHz from the 38.4 MHz reference (Linux tegra210 table: M=1 N=28
+//   P=4 (hw 3), SDM din 0xF400 -> N 28.125; misc defaults MISC0 0x40000020,
+//   SS_CFG SDM on / SSC off, CTRL1 0xF400F0DA, CTRL2 0x2004F400);
+//   sor1_out mux (CLK_SOURCE_SOR1 [15:14]) = sor_safe, sor1 gate (CLK_ENB_X
+//   bit 23) on, sor1 reset pulse (RST_DEV_X bit 23);
+//   SOR_CLK_CNTRL: DP_CLK_SEL = DIFF_DPCLK, link speed; prod_c_dp (PLL0 mask
+//   0x0F000F10 = 0x01000310, PLL1 0x03F00100 = 0x00400100, PLL3 bit 13,
+//   0x70 = 0, DP_SPARE0 bit 0); termination calibration; DP pad power-up
+//   steps 1-5; lanes TXD_2 + TXD_1 (xbar-ctrl <2 1 0 3 4>, 2 lanes), lane
+//   count 2, lane sequencer power-up; DP_SPARE0 external panel + macro sorclk;
+//   DPCD SET_POWER D0, 8b/10b, link rate, lane count (+ enhanced framing);
+//   DP_CONFIG idle-before-attach, LINKCTL enhanced framing + port enable,
+//   XBAR_CTRL; sor1_out mux = sor1_pad_clkout; lane precharge; then the DP
+//   training: TPS1 with swing/pre-emphasis requests until CR_DONE on both
+//   lanes, then TPS2 until EQ, symbol lock and interlane align. Drive levels
+//   use the DT lt-data tables (pc2 level 0). HBR (2.7 Gbps) first, RBR next.
+#define R427_SOR1_BASE          0x54580000UL
+#define R427_CAR_CLK_OUT_ENB_X  0x280U
+#define R427_CAR_CLK_ENB_X_SET  0x284U
+#define R427_CAR_CLK_ENB_X_CLR  0x288U
+#define R427_CAR_RST_DEV_X      0x28CU
+#define R427_CAR_RST_DEV_X_SET  0x290U
+#define R427_CAR_RST_DEV_X_CLR  0x294U
+#define R427_X_SOR1             (1U << 23)
+#define R427_CAR_SRC_SOR1       0x410U
+#define R427_SOR1_OUT_MASK      (3U << 14)
+#define R427_SOR1_OUT_SAFE      (0U << 14)
+#define R427_SOR1_OUT_PAD       (1U << 14)
+#define R427_PLLDP_BASE         0x590U
+#define R427_PLLDP_MISC         0x594U
+#define R427_PLLDP_SS_CFG       0x598U
+#define R427_PLLDP_SS_CTRL1     0x59CU
+#define R427_PLLDP_SS_CTRL2     0x5A0U
+#define R427_PLL_ENABLE         (1U << 30)
+#define R427_PLL_LOCK           (1U << 27)
+#define R427_PLL_LOCK_OVERRIDE  (1U << 24)
+#define R427_PLL_IDDQ           (1U << 18)
+// SOR word offsets
+#define R427_CLK_CNTRL          0x13U
+#define R427_PWR                0x15U
+#define R427_PLL0               0x17U
+#define R427_PLL1               0x18U
+#define R427_PLL2               0x19U
+#define R427_PLL3               0x1AU
+#define R427_PROD_1C            0x1CU
+#define R427_LANE_SEQ_CTL       0x21U
+#define R427_XBAR_CTRL          0x4AU
+#define R427_XBAR_POL           0x4BU
+#define R427_LINKCTL0           0x4CU
+#define R427_DC0                0x4EU
+#define R427_PR0                0x52U
+#define R427_DP_CONFIG0         0x58U
+#define R427_PADCTL0            0x5CU
+#define R427_DP_SPARE0          0x60U
+#define R427_DP_TPG             0x6DU
+
+STATIC CONST CHAR16 *mR427Step = NULL;
+STATIC BOOLEAN mR427Ok;
+STATIC UINT8 mR427Bw, mR427Status[6];
+STATIC UINT32 mR427Tries;
+
+// DT lt-data, pc2 level 0, index = (vs,pe) with vs+pe <= 3:
+// 0..3 = vs0 pe0..3, 4..6 = vs1 pe0..2, 7..8 = vs2 pe0..1, 9 = vs3 pe0.
+// Per logical lane (pc2_l0 .. pc2_l3 are per pc2 level, all lanes share one row).
+STATIC CONST UINT8 mR427Vs[10]  = { 0x13, 0x19, 0x1E, 0x28, 0x1E, 0x25, 0x2D, 0x28, 0x32, 0x3C };
+STATIC CONST UINT8 mR427Pe[10]  = { 0x00, 0x08, 0x12, 0x24, 0x01, 0x0E, 0x1D, 0x01, 0x13, 0x00 };
+STATIC CONST UINT8 mR427TxPu[10] = { 0x20, 0x30, 0x40, 0x60, 0x30, 0x40, 0x60, 0x40, 0x60, 0x60 };
+// xbar-ctrl <2 1 0 3 4>: logical lane 0 -> pad lane 2, lane 1 -> pad lane 1.
+// Per pad lane: shift in DC/PR (pad 2 -> 0, pad 1 -> 8) and PD_TXD bit (pad 2 -> bit 0, pad 1 -> bit 1).
+STATIC CONST UINT8 mR427LaneShift[2] = { 0, 8 };
+
+STATIC UINT32 R427Rd (UINT32 W) {
+  return ((volatile UINT32 *)R427_SOR1_BASE)[W];
+}
+
+STATIC VOID R427Wr (UINT32 W, UINT32 V) {
+  ((volatile UINT32 *)R427_SOR1_BASE)[W] = V;
+}
+
+STATIC VOID R427Field (UINT32 W, UINT32 Mask, UINT32 V) {
+  R427Wr (W, (R427Rd (W) & ~Mask) | (V & Mask));
+}
+
+STATIC BOOLEAN R427Poll (UINT32 W, UINT32 Mask, UINT32 Want, UINTN TimeoutUs) {
+  UINTN T;
+  for (T = 0; T < TimeoutUs; T += 10) {
+    if ((R427Rd (W) & Mask) == Want) return TRUE;
+    gBS->Stall (10);
+  }
+  return (R427Rd (W) & Mask) == Want;
+}
+
+STATIC BOOLEAN R427DpcdW (UINT32 Addr, CONST UINT8 *Data, UINTN N) {
+  UINT32 St = 0;
+  UINT8 Buf[16];
+  CopyMem (Buf, Data, N);
+  if (R426AuxXfer (R426_CMD_AUXWR, Addr, Buf, N, TRUE, &St, NULL)) return TRUE;
+  Print (L"R427 DPCD write %03x FAIL AUXSTAT=%08x\r\n", Addr, St);
+  return FALSE;
+}
+
+STATIC BOOLEAN R427DpcdW1 (UINT32 Addr, UINT8 V) {
+  return R427DpcdW (Addr, &V, 1);
+}
+
+STATIC BOOLEAN R427DpcdR (UINT32 Addr, UINT8 *Data, UINTN N) {
+  UINT32 St = 0;
+  UINTN Got = 0;
+  if (R426AuxXfer (R426_CMD_AUXRD, Addr, Data, N, FALSE, &St, &Got) && Got >= N) return TRUE;
+  Print (L"R427 DPCD read %03x FAIL AUXSTAT=%08x got %u\r\n", Addr, St, (UINT32)Got);
+  return FALSE;
+}
+
+STATIC VOID R427Dump (CONST CHAR16 *Tag) {
+  Print (L"R427 %s: PWR=%08x CLK=%08x PLL0=%08x PLL1=%08x PLL2=%08x PLL3=%08x SEQ=%08x LINK=%08x PAD=%08x SPARE=%08x\r\n",
+         Tag, R427Rd (R427_PWR), R427Rd (R427_CLK_CNTRL), R427Rd (R427_PLL0), R427Rd (R427_PLL1),
+         R427Rd (R427_PLL2), R427Rd (R427_PLL3), R427Rd (R427_LANE_SEQ_CTL), R427Rd (R427_LINKCTL0),
+         R427Rd (R427_PADCTL0), R427Rd (R427_DP_SPARE0));
+}
+
+STATIC VOID R427SorOut (UINT32 Sel) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  // HW bug 1425607 (L4T): gate the clock while switching the mux.
+  Car[R427_CAR_CLK_ENB_X_CLR / 4] = R427_X_SOR1;
+  gBS->Stall (5);
+  Car[R427_CAR_SRC_SOR1 / 4] = (Car[R427_CAR_SRC_SOR1 / 4] & ~R427_SOR1_OUT_MASK) | Sel;
+  gBS->Stall (5);
+  Car[R427_CAR_CLK_ENB_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (20);
+}
+
+STATIC BOOLEAN R427PllDp (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  UINT32 B = Car[R427_PLLDP_BASE / 4];
+  UINTN T;
+  Print (L"R427 PLLDP before: BASE=%08x MISC=%08x SS_CFG=%08x\r\n", B, Car[R427_PLLDP_MISC / 4],
+         Car[R427_PLLDP_SS_CFG / 4]);
+  if ((B & R427_PLL_ENABLE) != 0 && (B & R427_PLL_LOCK) != 0) {
+    Print (L"R427 PLLDP already on and locked; kept.\r\n");
+    return TRUE;
+  }
+  Car[R427_PLLDP_BASE / 4] = (B | R427_PLL_IDDQ) & ~(R427_PLL_LOCK_OVERRIDE | R427_PLL_ENABLE);
+  Car[R427_PLLDP_MISC / 4] = 0x40000020U;
+  Car[R427_PLLDP_SS_CFG / 4] = 0x80000000U;        // SDM on, SSC off
+  Car[R427_PLLDP_SS_CTRL1 / 4] = 0xF400F0DAU;
+  Car[R427_PLLDP_SS_CTRL2 / 4] = 0x2004F400U;      // SDM din 0xF400
+  gBS->Stall (1);
+  B = R427_PLL_IDDQ | (3U << 19) | (28U << 8) | 1U; // P=4 (hw 3), N=28, M=1, ref sel 0
+  Car[R427_PLLDP_BASE / 4] = B;
+  gBS->Stall (2);
+  B &= ~R427_PLL_IDDQ;
+  Car[R427_PLLDP_BASE / 4] = B;
+  gBS->Stall (5);
+  Car[R427_PLLDP_BASE / 4] = B | R427_PLL_ENABLE;
+  for (T = 0; T < 1000 && (Car[R427_PLLDP_BASE / 4] & R427_PLL_LOCK) == 0; ++T) gBS->Stall (10);
+  B = Car[R427_PLLDP_BASE / 4];
+  Print (L"R427 PLLDP after: BASE=%08x (enable=%u lock=%u after %u us) MISC=%08x SS_CFG=%08x\r\n",
+         B, (B & R427_PLL_ENABLE) != 0, (B & R427_PLL_LOCK) != 0, (UINT32)(T * 10),
+         Car[R427_PLLDP_MISC / 4], Car[R427_PLLDP_SS_CFG / 4]);
+  return (B & R427_PLL_LOCK) != 0;
+}
+
+STATIC VOID R427TermCal (VOID) {
+  UINT32 Adj = 8, Try = 8;
+  R427Field (R427_PLL2, 1U << 22, 0);              // bandgap on
+  R427Field (R427_PLL1, 1U << 8, 1U << 8);         // TMDS_TERM enable
+  gBS->Stall (50);
+  R427Field (R427_PADCTL0, 1U << 23, 0);           // PAD_CAL power up
+  gBS->Stall (20);
+  R427Field (R427_PLL1, 0xFU << 9, Adj << 9);
+  while (Try != 0) {
+    gBS->Stall (150);
+    if ((R427Rd (R427_PLL1) & (1U << 15)) != 0) Adj -= Try;
+    Try >>= 1;
+    Adj += Try;
+    R427Field (R427_PLL1, 0xFU << 9, Adj << 9);
+  }
+  R427Field (R427_PADCTL0, 1U << 23, 1U << 23);    // PAD_CAL power down
+  gBS->Stall (20);
+  R427Field (R427_PLL2, 1U << 22, 1U << 22);       // bandgap off
+  R427Field (R427_PLL1, 1U << 8, 0);
+  gBS->Stall (50);
+  Print (L"R427 termination calibration: TERMADJ=%u PLL1=%08x\r\n", (R427Rd (R427_PLL1) >> 9) & 0xF, R427Rd (R427_PLL1));
+}
+
+STATIC VOID R427PadPowerUp (VOID) {
+  R427Field (R427_PLL2, 1U << 18, 0);              // AUX2 override powerdown
+  R427Field (R427_PLL2, 1U << 17, 1U << 17);       // AUX1 PLLCAPPD override
+  // step 1: PDPORT, PDBG, PLLCAPD, PDPLL, PLLVCOPD, PDCAL
+  R427Field (R427_PLL2, (1U << 23) | (1U << 22) | (1U << 24), (1U << 23) | (1U << 22) | (1U << 24));
+  R427Field (R427_PLL0, 1U | (1U << 2), 1U | (1U << 2));
+  R427Field (R427_PADCTL0, 1U << 23, 1U << 23);
+  gBS->Stall (10);                                 // step 2 (no DPD pinctrl for sor1)
+  R427Field (R427_PLL2, 1U << 22, 0);              // step 3: bandgap
+  gBS->Stall (150);
+  R427Field (R427_PLL0, 1U | (1U << 2), 0);        // step 4: PLL on, VCO
+  R427Field (R427_PLL2, 1U << 24, 0);
+  gBS->Stall (1000);
+  R427Field (R427_PLL2, 1U << 23, 0);              // step 5: port
+  R427Field (R427_PLL1, 1U << 8, 1U << 8);         // TERM_ENABLE back on
+  gBS->Stall (20);
+}
+
+STATIC VOID R427SetTpg (UINT32 Tp) {
+  // per logical lane byte: pattern [3:0], scrambler [5:4], channel coding [6]
+  UINT32 L = (Tp == 0) ? (0x00U | (1U << 4) | (1U << 6)) : (Tp | (1U << 6));
+  R427Wr (R427_DP_TPG, L | (L << 8));
+  R427DpcdW1 (0x102, (UINT8)(Tp == 0 ? 0x00 : (0x20 | Tp)));
+}
+
+STATIC UINTN R427Idx (UINT8 Vs, UINT8 Pe) {
+  CONST UINT8 Base[4] = { 0, 4, 7, 9 };
+  if (Vs > 3) Vs = 3;
+  if (Pe > 3 - Vs) Pe = (UINT8)(3 - Vs);
+  return Base[Vs] + Pe;
+}
+
+STATIC VOID R427ApplyLevels (UINT8 *Vs, UINT8 *Pe) {
+  UINTN I, Idx;
+  UINT32 TxPu = 0;
+  UINT8 Set[2];
+  for (I = 0; I < 2; ++I) {
+    if (Vs[I] > 3) Vs[I] = 3;
+    if (Pe[I] > 3 - Vs[I]) Pe[I] = (UINT8)(3 - Vs[I]);
+    Idx = R427Idx (Vs[I], Pe[I]);
+    R427Field (R427_PR0, 0xFFU << mR427LaneShift[I], (UINT32)mR427Pe[Idx] << mR427LaneShift[I]);
+    R427Field (R427_DC0, 0xFFU << mR427LaneShift[I], (UINT32)mR427Vs[Idx] << mR427LaneShift[I]);
+    if (mR427TxPu[Idx] > TxPu) TxPu = mR427TxPu[Idx];
+    Set[I] = (UINT8)(Vs[I] | ((Vs[I] >= 3 - Pe[I]) ? 0x04 : 0) | (Pe[I] << 3) | ((Pe[I] >= 3 - Vs[I]) ? 0x20 : 0));
+  }
+  R427Field (R427_PADCTL0, (0xFFU << 8) | (1U << 22), (TxPu << 8) | (1U << 22));
+  gBS->Stall (20);
+  R427DpcdW (0x103, Set, 2);
+}
+
+STATIC VOID R427ReadAdjust (CONST UINT8 *S, UINT8 *Vs, UINT8 *Pe) {
+  Vs[0] = S[4] & 3;
+  Pe[0] = (S[4] >> 2) & 3;
+  Vs[1] = (S[4] >> 4) & 3;
+  Pe[1] = (S[4] >> 6) & 3;
+}
+
+STATIC BOOLEAN R427Train (UINT8 Bw) {
+  UINT8 Vs[2] = { 0, 0 }, Pe[2] = { 0, 0 }, S[6], Interval;
+  UINT8 OldVs0 = 0xFF, OldVs1 = 0xFF;
+  UINTN Try, Same = 0;
+  BOOLEAN Cr = FALSE, Eq = FALSE;
+  Interval = mR426Dpcd[0x0E] & 0x7F;
+
+  mR427Step = L"CLOCK-RECOVERY";
+  R427SetTpg (1);
+  for (Try = 0; Try < 10; ++Try) {
+    R427ApplyLevels (Vs, Pe);
+    gBS->Stall (Interval ? (UINTN)Interval * 4000 : 200);
+    if (!R427DpcdR (0x202, S, 6)) return FALSE;
+    CopyMem (mR427Status, S, 6);
+    Print (L"R427 CR %u: vs %u/%u pe %u/%u -> status %02x %02x %02x %02x adj %02x %02x\r\n",
+           (UINT32)Try, Vs[0], Vs[1], Pe[0], Pe[1], S[0], S[1], S[2], S[3], S[4], S[5]);
+    ++mR427Tries;
+    if ((S[0] & 0x11) == 0x11) { Cr = TRUE; break; }
+    if (Vs[0] == 3 && Vs[1] == 3) break;
+    if (Vs[0] == OldVs0 && Vs[1] == OldVs1) { if (++Same >= 5) break; } else Same = 0;
+    OldVs0 = Vs[0];
+    OldVs1 = Vs[1];
+    R427ReadAdjust (S, Vs, Pe);
+  }
+  if (!Cr) {
+    Print (L"R427 clock recovery FAILED at %u.%u Gbps\r\n", (UINT32)(Bw * 27 / 100), (UINT32)((Bw * 27 / 10) % 10));
+    R427SetTpg (0);
+    return FALSE;
+  }
+  Print (L"R427 clock recovery OK on both lanes.\r\n");
+
+  mR427Step = L"CHANNEL-EQUALIZATION";
+  R427SetTpg (2);
+  for (Try = 0; Try < 6; ++Try) {
+    R427ApplyLevels (Vs, Pe);
+    gBS->Stall (Interval ? (UINTN)Interval * 4000 : 500);
+    if (!R427DpcdR (0x202, S, 6)) return FALSE;
+    CopyMem (mR427Status, S, 6);
+    Print (L"R427 EQ %u: vs %u/%u pe %u/%u -> status %02x %02x %02x %02x adj %02x %02x\r\n",
+           (UINT32)Try, Vs[0], Vs[1], Pe[0], Pe[1], S[0], S[1], S[2], S[3], S[4], S[5]);
+    ++mR427Tries;
+    if ((S[0] & 0x11) != 0x11) { Print (L"R427 clock recovery lost during EQ.\r\n"); break; }
+    if ((S[0] & 0x77) == 0x77 && (S[2] & 0x01) != 0) { Eq = TRUE; break; }
+    R427ReadAdjust (S, Vs, Pe);
+  }
+  R427SetTpg (0);
+  if (!Eq) {
+    Print (L"R427 channel equalization FAILED\r\n");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+STATIC VOID R427SetLinkRate (UINT8 Bw) {
+  R427SorOut (R427_SOR1_OUT_SAFE);
+  R427Field (R427_CLK_CNTRL, 0x7FU, 3U | ((UINT32)Bw << 2));  // DIFF_DPCLK + link speed
+  gBS->Stall (300);
+}
+
+STATIC VOID R427DpLinkStage2b (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  CONST UINT8 Rates[2] = { 0x0A, 0x06 };
+  UINTN R;
+  UINT32 V;
+  UINT8 One;
+
+  Print (L"\r\n---- R427 DP Alt Mode stage 2b (SOR1 + link training, no video) ----\r\n");
+  mR427Step = L"PLLDP";
+  if (!R427PllDp ()) { Print (L"R427 PLLDP did not lock. Stopped.\r\n"); return; }
+
+  mR427Step = L"SOR1-CLOCK";
+  Print (L"R427 CAR before: SRC_SOR1=%08x CLK_ENB_X=%08x RST_DEV_X=%08x\r\n",
+         Car[R427_CAR_SRC_SOR1 / 4], Car[R427_CAR_CLK_OUT_ENB_X / 4], Car[R427_CAR_RST_DEV_X / 4]);
+  Car[R427_CAR_SRC_SOR1 / 4] = (Car[R427_CAR_SRC_SOR1 / 4] & ~R427_SOR1_OUT_MASK) | R427_SOR1_OUT_SAFE;
+  Car[R427_CAR_CLK_ENB_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (10);
+  Car[R427_CAR_RST_DEV_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (2000);
+  Car[R427_CAR_RST_DEV_X_CLR / 4] = R427_X_SOR1;
+  gBS->Stall (1000);
+  Print (L"R427 CAR after: SRC_SOR1=%08x CLK_ENB_X=%08x RST_DEV_X=%08x\r\n",
+         Car[R427_CAR_SRC_SOR1 / 4], Car[R427_CAR_CLK_OUT_ENB_X / 4], Car[R427_CAR_RST_DEV_X / 4]);
+  R427Dump (L"SOR1 reset state");
+
+  mR427Step = L"SOR1-PAD";
+  R427Field (R427_CLK_CNTRL, 0x7FU, 3U | ((UINT32)Rates[0] << 2));
+  gBS->Stall (300);
+  R427Field (R427_PLL0, 0x0F000F10U, 0x01000310U);   // prod_c_dp
+  R427Field (R427_PLL1, 0x03F00100U, 0x00400100U);
+  R427Field (R427_PLL3, 0x00002000U, 0x00002000U);
+  R427Wr (R427_PROD_1C, 0);
+  R427Field (R427_DP_SPARE0, 1U, 1U);
+  R427TermCal ();
+  R427PadPowerUp ();
+  R427Field (R427_PADCTL0, 0xFU, 0x3U);               // pad lanes 2 and 1 powered (TXD_2, TXD_1)
+  R427Field (R427_LINKCTL0, 0x1FU << 16, 3U << 16);   // lane count 2
+  if (!R427Poll (R427_LANE_SEQ_CTL, 1U << 28, 0, 100000))
+    Print (L"R427 lane sequencer busy before power-up\r\n");
+  R427Wr (R427_LANE_SEQ_CTL, (1U << 31) | (1U << 20) | (15U << 12));
+  if (!R427Poll (R427_LANE_SEQ_CTL, 1U << 31, 0, 100000)) {
+    R427Dump (L"lane sequencer timeout");
+    Print (L"R427 lane power-up did not finish. Stopped.\r\n");
+    return;
+  }
+  V = R427Rd (R427_DP_SPARE0);
+  R427Wr (R427_DP_SPARE0, (V & ~(1U << 1)) | (1U << 2)); // external panel, macro sorclk
+  R427Dump (L"pads up");
+
+  mR427Step = L"DPCD-SETUP";
+  if (!R427DpcdW1 (0x600, 0x01)) return;               // D0
+  gBS->Stall (1000);
+  R427DpcdW1 (0x108, 0x01);                             // 8b/10b
+  R427DpcdW1 (0x107, 0x00);                             // no downspread
+  R427Field (R427_DP_CONFIG0, 1U << 28, 1U << 28);      // idle before attach
+  R427Field (R427_LINKCTL0, (1U << 14) | 1U, ((mR426Dpcd[2] & 0x80) ? (1U << 14) : 0) | 1U);
+  V = (2U << 2) | (1U << 5) | (0U << 8) | (3U << 11) | (4U << 14);
+  R427Field (R427_XBAR_CTRL, 0x3U | (0x7FFFU << 2), V);
+  R427Wr (R427_XBAR_POL, 0);
+
+  for (R = 0; R < 2; ++R) {
+    mR427Bw = Rates[R];
+    mR427Step = L"LINK-RATE";
+    if (R != 0) R427SetLinkRate (mR427Bw);
+    R427DpcdW1 (0x100, mR427Bw);
+    One = (UINT8)(2 | ((mR426Dpcd[2] & 0x80) ? 0x80 : 0));
+    R427DpcdW1 (0x101, One);
+    R427SorOut (R427_SOR1_OUT_PAD);
+    R427Field (R427_PADCTL0, 0xFU << 4, 0x3U << 4);   // precharge
+    gBS->Stall (50);
+    R427Field (R427_PADCTL0, 0xFU << 4, 0);
+    Print (L"R427 training at %s Gbps x 2 lanes (SRC_SOR1=%08x)\r\n",
+           mR427Bw == 0x0A ? L"2.7" : L"1.62", Car[R427_CAR_SRC_SOR1 / 4]);
+    if (R427Train (mR427Bw)) {
+      mR427Step = L"DONE";
+      mR427Ok = TRUE;
+      Print (L"R427 LINK TRAINED: %s Gbps x 2 lanes. Lane status %02x %02x align %02x.\r\n",
+             mR427Bw == 0x0A ? L"2.7" : L"1.62", mR427Status[0], mR427Status[1], mR427Status[2]);
+      R427Dump (L"trained");
+      return;
+    }
+  }
+  R427Dump (L"training failed");
+}
+
+STATIC VOID R427PrintSummary (VOID) {
+  if (mR427Step == NULL) return;
+  Print (L"R427 DP-LINK: %s at %s; rate %02x x2; status %02x %02x %02x; steps %u\r\n",
+         mR427Ok ? L"DONE" : L"STOPPED", mR427Step, mR427Bw, mR427Status[0], mR427Status[1],
+         mR427Status[2], mR427Tries);
+}
+
 STATIC VOID R424DpAltStage1 (VOID) {
   CONST UINT8 DiscId[6]   = { BM_OUTGOING_VDM, 4, 0x01, 0x80, 0x00, 0xFF };
   CONST UINT8 EnterNin[6] = { BM_OUTGOING_VDM, 4, 0x04, 0x81, 0x7E, 0x05 };
@@ -5422,6 +5820,7 @@ R424Watch:
   }
   R424PrintState (L"end");
   R426DpAuxStage2a ();
+  if (mR426Ok) R427DpLinkStage2b ();
 }
 
 STATIC VOID R424PrintSummary (VOID) {
@@ -5619,11 +6018,12 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R426H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R427H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
+  Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
@@ -5901,6 +6301,7 @@ R288Cleanup:
          mR413PadctlReleased ? L" PADCTL reset released" : L"");
   R424PrintSummary ();
   R426PrintSummary ();
+  R427PrintSummary ();
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

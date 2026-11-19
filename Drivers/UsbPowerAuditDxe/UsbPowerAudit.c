@@ -4730,7 +4730,12 @@ STATIC BOOLEAN R363ConfigureSink (VOID) {
 // (SOR1/DPAUX1/DC-B) is touched here: that is stage 2/3. Other partners (a
 // USB-C hub with a charger) only get Discover Identity / SVIDs / DP modes read
 // and printed; no mode is entered for them (R424_GENERIC_DP_ENTER).
-#define R424_GENERIC_DP_ENTER   0
+// R425: R424_GENERIC_DP_ENTER = 1. A partner that is not the Nintendo dock but
+// answers Discover Mode (SVID FF01) with UFP_D gets the L4T generic path:
+// DP_ENTER_MODE (0x3131) directly (no Nintendo mode), the DP Configure pin
+// taken from the plug or receptacle field as the partner reports, and no dock
+// VDMs (state / LED / hub are Nintendo-only).
+#define R424_GENERIC_DP_ENTER   1
 #define BM_ALERT_STATUS         0x02
 #define BM_DP_ALERT_EN          0x19
 #define BM_INCOMING_VDM         0x50
@@ -4770,6 +4775,7 @@ STATIC BOOLEAN mR424Failed;
 STATIC UINT16 mR424Vid, mR424Pid, mR424DpStatus;
 STATIC UINT8 mR424IdType;
 STATIC BOOLEAN mR424Hpd;
+STATIC BOOLEAN mR424Generic;
 
 STATIC CONST CHAR16 *R424StepName (R424_STEP Step) {
   switch (Step) {
@@ -4919,22 +4925,26 @@ STATIC VOID R424Fail (R424_STEP Step) {
 }
 
 // Generic partner: only read what it offers (SVIDs, DP modes).
-STATIC VOID R424ReadGenericModes (VOID) {
+STATIC BOOLEAN R424ReadGenericModes (VOID) {
   CONST UINT8 DiscSvid[6] = { BM_OUTGOING_VDM, 4, 0x02, 0x80, 0x00, 0xFF };
   CONST UINT8 DiscMode[6] = { BM_OUTGOING_VDM, 4, 0x03, 0x80, 0x01, 0xFF };
   UINT8 Vdm[29];
   UINTN I;
-  if (!R424VdmExchange (L"DISCOVER-SVID", DiscSvid, sizeof (DiscSvid), Vdm)) return;
+  if (!R424VdmExchange (L"DISCOVER-SVID", DiscSvid, sizeof (DiscSvid), Vdm)) return FALSE;
   if (Vdm[1] == (0x40 | 0x02)) {
     for (I = 0; I < ((UINTN)(Vdm[0] >= 4 ? Vdm[0] - 4 : 0) / 2) && I < 12; ++I)
       Print (L"R424 SVID%u %04x\r\n", (UINT32)I, Vdm[5 + I * 2] | (Vdm[6 + I * 2] << 8));
   }
-  if (!R424VdmExchange (L"DISCOVER-MODE-DP", DiscMode, sizeof (DiscMode), Vdm)) return;
+  if (!R424VdmExchange (L"DISCOVER-MODE-DP", DiscMode, sizeof (DiscMode), Vdm)) return FALSE;
   if (Vdm[0] > 4 && Vdm[1] == (0x40 | 0x03) && Vdm[3] == 0x01 && Vdm[4] == 0xFF &&
-      (Vdm[5] & R424_VDO_DP_UFP_D) != 0 && (Vdm[5] & R424_VDO_DP_SUPPORT) != 0)
-    Print (L"R424 partner supports DP Alt Mode (UFP_D). Not entered (R424_GENERIC_DP_ENTER=0).\r\n");
-  else
-    Print (L"R424 partner reports no DP Alt Mode.\r\n");
+      (Vdm[5] & R424_VDO_DP_UFP_D) != 0 && (Vdm[5] & R424_VDO_DP_SUPPORT) != 0) {
+    Print (L"R424 partner supports DP Alt Mode (UFP_D): DPCap %02x%02x%02x%02x (%s, plug pins %02x, receptacle pins %02x)\r\n",
+           Vdm[8], Vdm[7], Vdm[6], Vdm[5], (Vdm[5] & R424_VDO_DP_RECEPTACLE) ? L"receptacle" : L"plug",
+           Vdm[6], Vdm[7]);
+    return TRUE;
+  }
+  Print (L"R424 partner reports no DP Alt Mode.\r\n");
+  return FALSE;
 }
 
 STATIC VOID R424DpAltStage1 (VOID) {
@@ -4979,20 +4989,25 @@ STATIC VOID R424DpAltStage1 (VOID) {
          mR424Vid, mR424Pid, mR424IdType, W2 & 0xFFFFU);
 
   if (!(mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U)) {
-    Print (L"R424 not a Nintendo dock: reading SVIDs/modes only.\r\n");
-    R424ReadGenericModes ();
+    Print (L"R424 not a Nintendo dock: reading SVIDs/modes.\r\n");
     mR424Step = R424_NOT_DOCK;
-    return;
+    if (!R424ReadGenericModes ()) return;
+    if (!R424_GENERIC_DP_ENTER) {
+      Print (L"R424 DP Alt Mode not entered (R424_GENERIC_DP_ENTER=0).\r\n");
+      return;
+    }
+    mR424Generic = TRUE;
+    Print (L"R425 generic DP Alt Mode partner: entering DP mode (no Nintendo mode, no dock VDMs).\r\n");
+  } else {
+    mR424Step = R424_ENTER_NIN;
+    if (!R424VdmExchange (L"ENTER-NINTENDO", EnterNin, sizeof (EnterNin), Vdm) ||
+        Vdm[1] != (0x40 | 0x04) || Vdm[2] != 0x81 || Vdm[3] != 0x7E || Vdm[4] != 0x05) {
+      Print (L"R424 Enter Nintendo Alt Mode: not ACKed\r\n");
+      R424Fail (R424_ENTER_NIN);
+      return;
+    }
+    Print (L"R424 Nintendo Alt Mode entered.\r\n");
   }
-
-  mR424Step = R424_ENTER_NIN;
-  if (!R424VdmExchange (L"ENTER-NINTENDO", EnterNin, sizeof (EnterNin), Vdm) ||
-      Vdm[1] != (0x40 | 0x04) || Vdm[2] != 0x81 || Vdm[3] != 0x7E || Vdm[4] != 0x05) {
-    Print (L"R424 Enter Nintendo Alt Mode: not ACKed\r\n");
-    R424Fail (R424_ENTER_NIN);
-    return;
-  }
-  Print (L"R424 Nintendo Alt Mode entered.\r\n");
 
   mR424Step = R424_DP_ENTER;
   R424DrainAlerts ();
@@ -5013,15 +5028,32 @@ STATIC VOID R424DpAltStage1 (VOID) {
          Caps[0], Caps[1], Caps[2], Caps[3], Caps[4], Caps[2], Caps[3]);
   // L4T bm92t_handle_dp_config_and_hpd: primary pin D for 2 lanes, then C.
   // The dock reports a plug but uses the receptacle field (it ignores it).
+  // Generic partners (R425): a plug is matched against the plug pin field
+  // (Caps[2]), a receptacle against the receptacle field (Caps[3]); both put
+  // the chosen pin in VDO byte 1 (Cfg[3]), as L4T does.
   Cfg[0] = BM_OUTGOING_VDM; Cfg[1] = 4;
   Cfg[2] = R424_VDO_DP_SUPPORT | R424_VDO_DP_U_UFP_D;
   Cfg[3] = 0; Cfg[4] = 0; Cfg[5] = 0;
   Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_C : R424_VDO_DP_PIN_D;
   for (I = 0; I < 2; ++I) {
-    if ((Caps[3] & Pin) != 0) {
-      Cfg[4] = Pin;
-      Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
-      break;
+    if (!mR424Generic) {
+      if ((Caps[3] & Pin) != 0) {
+        Cfg[4] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
+    } else if ((Caps[1] & R424_VDO_DP_RECEPTACLE) == 0) {
+      if ((Caps[2] & Pin) != 0) {
+        Cfg[3] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
+    } else {
+      if ((Caps[3] & Pin) != 0) {
+        Cfg[3] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
     }
     Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_D : R424_VDO_DP_PIN_C;
   }
@@ -5030,9 +5062,9 @@ STATIC VOID R424DpAltStage1 (VOID) {
     R424Fail (R424_DP_CAPS);
     return;
   }
-  Print (L"R424 DP configure: pin %c (%u lanes on the cable, SOR1 uses %u)\r\n",
+  Print (L"R424 DP configure: pin %c (%u lanes on the cable, SOR1 uses %u) VDO %02x %02x %02x %02x\r\n",
          (Pin == R424_VDO_DP_PIN_C) ? L'C' : L'D', (UINT32)Lanes,
-         (UINT32)(Lanes > R424_DP_LANES ? R424_DP_LANES : Lanes));
+         (UINT32)(Lanes > R424_DP_LANES ? R424_DP_LANES : Lanes), Cfg[2], Cfg[3], Cfg[4], Cfg[5]);
 
   mR424Step = R424_DP_CFG;
   R424DrainAlerts ();
@@ -5055,6 +5087,10 @@ STATIC VOID R424DpAltStage1 (VOID) {
   R424PrintState (L"DP configured");
 
   // Nintendo dock VDMs (failures here are reported but do not undo DP).
+  if (mR424Generic) {
+    Print (L"R425 generic partner: dock VDMs skipped.\r\n");
+    goto R424Watch;
+  }
   mR424Step = R424_DOCK_STATE;
   if (R424VdmExchange (L"DOCK-STATE", Query, sizeof (Query), Vdm) && Vdm[6] == 2 && Vdm[7] == 0x17)
     Print (L"R424 dock state: %02x %02x %02x %02x%s\r\n", Vdm[9], Vdm[10], Vdm[11], Vdm[12],
@@ -5081,6 +5117,7 @@ STATIC VOID R424DpAltStage1 (VOID) {
                                              L"R424 dock USB hub: unexpected reply\r\n");
     break;
   }
+R424Watch:
   mR424Step = R424_DONE;
 
   // Watch DP status / HPD for 10 s so a TV switched on or an HDMI cable
@@ -5107,9 +5144,10 @@ STATIC VOID R424DpAltStage1 (VOID) {
 
 STATIC VOID R424PrintSummary (VOID) {
   if (mR424Step == R424_NOT_RUN) return;
-  Print (L"R424 DP-ALT: %s at %s; partner %04x:%04x type %u; DP=%04x (DP_EN=%u SIGNAL=%u) HPD=%u\r\n",
+  Print (L"R424 DP-ALT: %s at %s%s; partner %04x:%04x type %u; DP=%04x (DP_EN=%u SIGNAL=%u) HPD=%u\r\n",
          mR424Failed ? L"STOPPED" : (mR424Step == R424_DONE ? L"DONE" : L"READ-ONLY"),
-         R424StepName (mR424Step), mR424Vid, mR424Pid, mR424IdType, mR424DpStatus,
+         R424StepName (mR424Step), mR424Generic ? L" (generic)" : L"",
+         mR424Vid, mR424Pid, mR424IdType, mR424DpStatus,
          (mR424DpStatus & BM_DP_STATUS_DP_EN) != 0, (mR424DpStatus & BM_DP_STATUS_SIGNAL_ON) != 0,
          mR424Hpd);
 }
@@ -5299,9 +5337,10 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R424H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R425H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
+  Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

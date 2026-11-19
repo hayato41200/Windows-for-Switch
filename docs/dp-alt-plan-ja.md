@@ -33,6 +33,8 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 
 公式ドック以外(USB-C ハブ + 充電器など)は、SVID と DP のモードを読んで表示するだけで、モードには入りません。今の動きは変わりません。ドックをつないでいないとき(OTG、何もない)は、R424 は動きません。
 
+**R425 / R425H(他社の機器):** 相手が公式ドックでなくても、Discover Mode(SVID FF01)で UFP_D を返したら、L4T と同じく任天堂のモードを抜いて `DP_ENTER_MODE`(0x3131)に進みます。DP Configure のピンは、相手がプラグ型なら能力のプラグ側、レセプタクル型ならレセプタクル側から選び、VDO の 1 バイト目に入れます(L4T と同じ)。ドックの VDM(状態、LED、ハブ)は行いません。電源をもらう機器(充電器つきのハブ、PD 入力つきの変換アダプター)だけが対象で、電源なしの変換ケーブル(Switch が VBUS を出す OTG の経路)はまだ対象外です。成功の目安は、まとめの行が `DONE at DONE (generic)` になり、`DP_EN=1` が出ること。
+
 **成功の目安(実機で見えるもの):**
 - 起動中の画面に `R424 partner VID=057e PID=2003 type=5`。
 - `R424 Nintendo Alt Mode entered.` と、`DP_CFG_AND_START_HPD: ... lastcmd=0`。
@@ -66,3 +68,5 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 - GPIO PCC1 の入力が、ピンの機能が DP(SFIO)のときにも読めるか。読めなければ段階 2 の DPAUX の HPD で確かめる。
 - ドックが、BM92T が自分で 15 V の契約をしたあとでも、DR_SWAP と Alt Mode に応じるか(L4T は自分で RDO を送る)。
 - Windows に入ったあと、BM92T の Alt Mode の状態が保たれるか(ドックの LED とハブで分かる)。
+- 電源なしの変換ケーブル: Switch がソース(VBUS を出す)で最初から DFP のとき、OTG の経路のどこで R424 の手順を呼ぶか。BM92T が VBUS を出す設定のまま Discover Identity に答えてもらえるか。
+- ピン C だけの機器(4 レーン)で、BM92T と SOR1 の 2 レーンの設定が通るか。

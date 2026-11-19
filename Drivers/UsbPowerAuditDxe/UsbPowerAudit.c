@@ -5645,6 +5645,333 @@ STATIC VOID R427PrintSummary (VOID) {
          mR427Status[2], mR427Tries);
 }
 
+//
+// R429: USB-C DisplayPort Alt Mode, stage 3 (first picture on the TV).
+// Runs only after R427/R428 trained the link. Powers DC-B (DISB partition,
+// disp2 clock from PLLP / shift divider 5.5 = 74.18 MHz), sets a CEA
+// 1280x720@60 raster with no windows (the DC outputs only its background
+// colour, so no framebuffer or memory client is needed), programs the SOR1
+// DP transfer unit and head-1 raster, then attaches SOR1 to DC-B (coreboot
+// tegra210 sor.c tegra_dc_sor_attach order). The TV should then show red,
+// green, blue and finally stay white.
+//
+#define R429_DC_BASE            0x54240000UL
+#define R429_CAR_RST_DEV_L      0x004U
+#define R429_CAR_CLK_OUT_ENB_L  0x010U
+#define R429_CAR_SRC_DISP2      0x140U
+#define R429_CAR_RST_DEV_L_SET  0x300U
+#define R429_CAR_RST_DEV_L_CLR  0x304U
+#define R429_CAR_CLK_ENB_L_SET  0x320U
+#define R429_L_DISP2            (1U << 26)
+#define R429_PMC_PWRGATE_TOGGLE 0x30U
+#define R429_PMC_REMOVE_CLAMP   0x34U
+#define R429_PMC_PWRGATE_STATUS 0x38U
+#define R429_PG_DISB            19U
+// DC word registers
+#define R429_DC_DISP_CMD        0x032U
+#define R429_DC_POWER_CTRL      0x036U
+#define R429_DC_INT_MASK        0x038U
+#define R429_DC_STATE_ACCESS    0x040U
+#define R429_DC_STATE_CTRL      0x041U
+#define R429_DC_WIN_HEADER      0x042U
+#define R429_DC_SIGNAL_OPT0     0x400U
+#define R429_DC_WIN_OPTIONS     0x402U
+#define R429_DC_TIMING_OPT      0x405U
+#define R429_DC_REF_TO_SYNC     0x406U
+#define R429_DC_SYNC_WIDTH      0x407U
+#define R429_DC_BACK_PORCH      0x408U
+#define R429_DC_ACTIVE          0x409U
+#define R429_DC_FRONT_PORCH     0x40AU
+#define R429_DC_CLOCK_CTRL      0x42EU
+#define R429_DC_IFACE_CTRL      0x42FU
+#define R429_DC_COLOR_CTRL      0x430U
+#define R429_DC_BG_COLOR        0x4E4U
+#define R429_DC_WIN_OPT         0x700U
+#define R429_DC_SOR1_ENABLE     (1U << 26)
+#define R429_DC_C_DISPLAY       (1U << 5)
+// SOR word registers (head 1)
+#define R429_SOR_SUPER_STATE0   0x01U
+#define R429_SOR_SUPER_STATE1   0x02U
+#define R429_SOR_STATE0         0x03U
+#define R429_SOR_STATE1         0x04U
+#define R429_SOR_HEAD_STATE1    0x08U
+#define R429_SOR_HEAD_STATE2    0x0AU
+#define R429_SOR_HEAD_STATE3    0x0CU
+#define R429_SOR_HEAD_STATE4    0x0EU
+#define R429_SOR_HEAD_STATE5    0x10U
+#define R429_SOR_TEST           0x16U
+#define R429_SOR_CSTM           0x1BU
+#define R429_SOR_HBLANK_SYM     0x63U
+#define R429_SOR_VBLANK_SYM     0x64U
+// CEA-861 mode 4: 1280x720@60, +hsync +vsync
+#define R429_HACT  1280U
+#define R429_HFP   110U
+#define R429_HSYNC 40U
+#define R429_HBP   220U
+#define R429_VACT  720U
+#define R429_VFP   5U
+#define R429_VSYNC 5U
+#define R429_VBP   20U
+#define R429_PCLK  74181818U   // 408 MHz / 5.5
+
+STATIC CONST CHAR16 *mR429Step = NULL;
+STATIC BOOLEAN mR429Ok;
+STATIC UINT32 mR429Test, mR429Tu, mR429Act, mR429Frac, mR429Wm;
+
+STATIC UINT32 R429DcRd (UINT32 W) {
+  return ((volatile UINT32 *)R429_DC_BASE)[W];
+}
+
+STATIC VOID R429DcWr (UINT32 W, UINT32 V) {
+  ((volatile UINT32 *)R429_DC_BASE)[W] = V;
+}
+
+STATIC VOID R429DcDump (CONST CHAR16 *Tag) {
+  Print (L"R429 DC-B %s: CMD=%08x POW=%08x ACCESS=%08x WINOPT=%08x CLK=%08x ACTIVE=%08x BG=%08x\r\n",
+         Tag, R429DcRd (R429_DC_DISP_CMD), R429DcRd (R429_DC_POWER_CTRL), R429DcRd (R429_DC_STATE_ACCESS),
+         R429DcRd (R429_DC_WIN_OPTIONS), R429DcRd (R429_DC_CLOCK_CTRL), R429DcRd (R429_DC_ACTIVE),
+         R429DcRd (R429_DC_BG_COLOR));
+}
+
+STATIC VOID R429SorDump (CONST CHAR16 *Tag) {
+  Print (L"R429 SOR1 %s: SUPER1=%08x STATE1=%08x TEST=%08x CSTM=%08x LINK=%08x DPCFG=%08x HB=%08x VB=%08x\r\n",
+         Tag, R427Rd (R429_SOR_SUPER_STATE1), R427Rd (R429_SOR_STATE1), R427Rd (R429_SOR_TEST),
+         R427Rd (R429_SOR_CSTM), R427Rd (R427_LINKCTL0), R427Rd (R427_DP_CONFIG0),
+         R427Rd (R429_SOR_HBLANK_SYM), R427Rd (R429_SOR_VBLANK_SYM));
+}
+
+//
+// Port of coreboot tegra210 dp.c tegra_dc_dp_calc_config (2 lanes, 24 bpp).
+//
+STATIC BOOLEAN R429CalcTu (UINT32 LinkRate, UINT32 *Tu, UINT32 *Act, UINT32 *Frac, UINT32 *Pol,
+                           UINT32 *Wm, INT32 *Hb, INT32 *Vb) {
+  CONST UINT64 F = 100000;
+  CONST UINT32 Lanes = 2, Bpp = 24;
+  UINT32 NumLinkClk, ActiveCount, ActivePol, ActiveFrac = 0;
+  UINT64 Ratio, ActiveSym, ActiveCountF, FracF, Approx, Err;
+  UINT64 LowErr = 64 * F, LowFrac = 0;
+  UINT32 LowCount = 0, LowPol = 0, LowTu = 64, I;
+  BOOLEAN Neg;
+
+  if ((UINT64)R429_PCLK * Bpp >= (UINT64)LinkRate * 8 * Lanes) return FALSE;
+  NumLinkClk = (UINT32)((UINT64)LinkRate * R429_HACT / R429_PCLK);
+  Ratio = (UINT64)R429_PCLK * Bpp * F / 8;
+  Ratio = Ratio / ((UINT64)LinkRate * Lanes);
+  for (I = 64; I >= 32; --I) {
+    ActiveSym = Ratio * I;
+    ActiveCountF = (ActiveSym / F) * F;
+    FracF = ActiveSym - ActiveCountF;
+    ActiveCount = (UINT32)(ActiveCountF / F);
+    if (FracF < F / 2) {
+      ActivePol = 0;
+    } else {
+      ActivePol = 1;
+      FracF = F - FracF;
+    }
+    if (FracF != 0) {
+      FracF = (F * F) / FracF;
+      if (FracF > 15 * F)
+        ActiveFrac = ActivePol ? 1 : 15;
+      else
+        ActiveFrac = ActivePol ? (UINT32)(FracF / F) + 1 : (UINT32)(FracF / F);
+    }
+    if (ActiveFrac == 1) ActivePol = 0;
+    if (ActivePol == 1)
+      Approx = ActiveFrac ? (ActiveCountF + (ActiveFrac * F - F) * F) / (ActiveFrac * F) : ActiveCountF + F;
+    else
+      Approx = ActiveFrac ? ActiveCountF + F / ActiveFrac : ActiveCountF;
+    if (ActiveSym < Approx) {
+      Err = NumLinkClk * ((Approx - ActiveSym) / I);
+      Neg = TRUE;
+    } else {
+      Err = NumLinkClk * ((ActiveSym - Approx) / I);
+      Neg = FALSE;
+    }
+    if ((Neg && LowErr > Err) || Err == 0) {
+      LowErr = Err;
+      LowTu = I;
+      LowCount = ActiveCount;
+      LowPol = ActivePol;
+      LowFrac = ActiveFrac;
+      if (Err == 0) break;
+    }
+  }
+  if (LowFrac == 0) {
+    *Pol = 0;
+    *Act = LowPol ? LowCount : LowCount - 1;
+    *Tu = LowTu;
+    *Frac = 1;
+  } else {
+    *Pol = LowPol;
+    *Act = LowCount;
+    *Tu = LowTu;
+    *Frac = (UINT32)LowFrac;
+  }
+  *Wm = (UINT32)(((Ratio * (*Tu) * (F - Ratio)) / F + LowErr) / F) + Bpp / 4 - 1;
+  if (*Wm > 30) *Wm = 30;
+  *Hb = (INT32)((UINT64)(R429_HBP + R429_HFP + R429_HSYNC - 7) * LinkRate / R429_PCLK) - 3 - (12 / Lanes);
+  if (*Hb < 0) *Hb = 0;
+  *Vb = (INT32)((UINT64)(R429_HACT - 25) * LinkRate / R429_PCLK) - (36 / Lanes) - 4;
+  if (*Vb < 0) *Vb = 0;
+  return TRUE;
+}
+
+STATIC BOOLEAN R429PowerDcb (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINTN T;
+
+  Print (L"R429 before: PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
+         Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
+         Car[R429_CAR_RST_DEV_L / 4]);
+  Car[R429_CAR_SRC_DISP2 / 4] = 0;                  // parent pll_p (408 MHz)
+  Car[R429_CAR_CLK_ENB_L_SET / 4] = R429_L_DISP2;
+  Car[R429_CAR_RST_DEV_L_SET / 4] = R429_L_DISP2;
+  gBS->Stall (10);
+  if ((Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) == 0) {
+    Pmc[R429_PMC_PWRGATE_TOGGLE / 4] = (1U << 8) | R429_PG_DISB;
+    for (T = 0; T < 1000 && (Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) == 0; ++T)
+      gBS->Stall (10);
+    gBS->Stall (10);
+    Pmc[R429_PMC_REMOVE_CLAMP / 4] = 1U << R429_PG_DISB;
+    gBS->Stall (10);
+  }
+  Car[R429_CAR_RST_DEV_L_CLR / 4] = R429_L_DISP2;
+  gBS->Stall (100);
+  Print (L"R429 after:  PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
+         Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
+         Car[R429_CAR_RST_DEV_L / 4]);
+  return (Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) != 0;
+}
+
+STATIC VOID R429SetColor (UINT32 Color) {
+  R429DcWr (R429_DC_BG_COLOR, Color);
+  R429DcWr (R429_DC_STATE_CTRL, 1U << 8);
+  R429DcWr (R429_DC_STATE_CTRL, 1U);
+}
+
+STATIC VOID R429DpVideoStage3 (VOID) {
+  CONST UINT32 LinkRate = (UINT32)mR427Bw * 27000000U;
+  UINT32 Tu, Act, Frac, Pol, Wm, I, Access, Htot, Vtot, V;
+  INT32 Hb, Vb;
+  UINT8 Ls[6];
+  CONST UINT32 Colors[4] = { 0xFF0000FFU, 0xFF00FF00U, 0xFFFF0000U, 0xFFFFFFFFU };
+  CONST CHAR16 *Names[4] = { L"colour 1 (red?)", L"colour 2 (green)", L"colour 3 (blue?)", L"white" };
+
+  Print (L"\r\n---- R429 DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour) ----\r\n");
+  mR429Step = L"TU-CALC";
+  if (!R429CalcTu (LinkRate, &Tu, &Act, &Frac, &Pol, &Wm, &Hb, &Vb)) {
+    Print (L"R429 mode does not fit the link. Stopped.\r\n");
+    return;
+  }
+  mR429Tu = Tu; mR429Act = Act; mR429Frac = Frac; mR429Wm = Wm;
+  Print (L"R429 TU size %u active %u frac %u pol %u watermark %u hblank %d vblank %d\r\n",
+         Tu, Act, Frac, Pol, Wm, Hb, Vb);
+
+  mR429Step = L"DCB-POWER";
+  if (!R429PowerDcb ()) { Print (L"R429 DISB partition did not power up. Stopped.\r\n"); return; }
+  R429DcDump (L"reset state");
+
+  mR429Step = L"DCB-MODE";
+  R429DcWr (R429_DC_INT_MASK, 0);
+  R429DcWr (R429_DC_STATE_ACCESS, 0);
+  for (I = 0; I < 3; ++I) {
+    R429DcWr (R429_DC_WIN_HEADER, 0x10U << I);
+    R429DcWr (R429_DC_WIN_OPT, 0);
+  }
+  R429DcWr (R429_DC_WIN_HEADER, 0);
+  R429DcWr (R429_DC_SIGNAL_OPT0, 0);
+  R429DcWr (R429_DC_TIMING_OPT, 1);
+  R429DcWr (R429_DC_IFACE_CTRL, 0);
+  R429DcWr (R429_DC_COLOR_CTRL, 8);                 // BASE888
+  R429DcWr (R429_DC_REF_TO_SYNC, (1U << 16) | 1U);
+  R429DcWr (R429_DC_SYNC_WIDTH, (R429_VSYNC << 16) | R429_HSYNC);
+  R429DcWr (R429_DC_BACK_PORCH, (R429_VBP << 16) | R429_HBP);
+  R429DcWr (R429_DC_ACTIVE, (R429_VACT << 16) | R429_HACT);
+  R429DcWr (R429_DC_FRONT_PORCH, (R429_VFP << 16) | R429_HFP);
+  R429DcWr (R429_DC_CLOCK_CTRL, 9);                 // shift clock / 5.5, PCD1
+  R429DcWr (R429_DC_BG_COLOR, Colors[0]);
+  R429DcWr (R429_DC_STATE_CTRL, (1U << 8) | (7U << 9));
+  R429DcWr (R429_DC_STATE_CTRL, 1U | (7U << 1));
+  gBS->Stall (1000);
+  R429DcDump (L"mode set");
+
+  mR429Step = L"SOR1-MODE";
+  V = R427Rd (R427_LINKCTL0);
+  V = (V & ~(0x7FU << 2)) | (Tu << 2) | 1U;
+  R427Wr (R427_LINKCTL0, V);
+  R427Wr (R427_DP_TPG, 0x50505050U);
+  V = R427Rd (R427_DP_CONFIG0);
+  V &= ~(0x3FU | (0x7FU << 8) | (0xFU << 16) | (1U << 24));
+  V |= Wm | (Act << 8) | (Frac << 16) | (Pol ? (1U << 24) : 0) | (1U << 26) | (1U << 31);
+  R427Wr (R427_DP_CONFIG0, V);
+  R427Field (R429_SOR_HBLANK_SYM, 0x1FFFFU, (UINT32)Hb);
+  R427Field (R429_SOR_VBLANK_SYM, 0x1FFFFU, (UINT32)Vb);
+  R427Wr (R429_SOR_STATE1, 2U | (8U << 8) | (1U << 6) | (5U << 17));  // head 1, DP-A, 24 bpp, + syncs
+  Htot = R429_HACT + R429_HFP + R429_HSYNC + R429_HBP;
+  Vtot = R429_VACT + R429_VFP + R429_VSYNC + R429_VBP;
+  R427Wr (R429_SOR_HEAD_STATE1, (Vtot << 16) | Htot);
+  R427Wr (R429_SOR_HEAD_STATE2, ((R429_VSYNC - 1) << 16) | (R429_HSYNC - 1));
+  R427Wr (R429_SOR_HEAD_STATE3, ((R429_VSYNC - 1 + R429_VBP) << 16) | (R429_HSYNC - 1 + R429_HBP));
+  R427Wr (R429_SOR_HEAD_STATE4, ((R429_VSYNC - 1 + R429_VBP + R429_VACT) << 16) |
+                                (R429_HSYNC - 1 + R429_HBP + R429_HACT));
+  R427Wr (R429_SOR_HEAD_STATE5, 1);
+  R427Field (R429_SOR_CSTM, (0xFU << 24) | (1U << 16), 2U << 24);
+  R429SorDump (L"mode set");
+
+  mR429Step = L"ATTACH";
+  Access = R429DcRd (R429_DC_STATE_ACCESS);
+  R429DcWr (R429_DC_STATE_ACCESS, Access | 4U);
+  R429DcWr (R429_DC_TIMING_OPT, 1);
+  R429DcWr (R429_DC_DISP_CMD, R429_DC_C_DISPLAY);
+  R429DcWr (R429_DC_STATE_ACCESS, Access);
+  R429DcWr (R429_DC_STATE_CTRL, 0x9F00);
+  R429DcWr (R429_DC_STATE_CTRL, 0x9F);
+  R429DcWr (R429_DC_POWER_CTRL, 0x00050155U);
+  if ((R427Rd (R429_SOR_TEST) & (1U << 10)) == 0) {
+    R427Wr (R429_SOR_SUPER_STATE1, 0);
+    R429DcWr (R429_DC_WIN_OPTIONS, 0);
+    R429DcWr (R429_DC_STATE_CTRL, 1);
+    gBS->Stall (17000 * 3);
+    R427Wr (R429_SOR_STATE0, 0);
+    R427Wr (R429_SOR_STATE0, 1);
+    R427Wr (R429_SOR_STATE0, 0);
+    R427Wr (R429_SOR_SUPER_STATE1, 1U << 3);
+    R427Wr (R429_SOR_SUPER_STATE1, (1U << 3) | (1U << 2) | 2U);  // attached, normal, awake
+    R427Wr (R429_SOR_SUPER_STATE0, 0);
+    R427Wr (R429_SOR_SUPER_STATE0, 1);
+    R427Wr (R429_SOR_SUPER_STATE0, 0);
+    gBS->Stall (17000 * 5);
+    R429DcWr (R429_DC_STATE_ACCESS, 1U | 4U);
+    R429DcWr (R429_DC_WIN_OPTIONS, R429_DC_SOR1_ENABLE);
+    R429DcWr (R429_DC_DISP_CMD, R429_DC_C_DISPLAY);
+    R429DcWr (R429_DC_STATE_CTRL, 1);
+  } else {
+    Print (L"R429 SOR1 already attached\r\n");
+  }
+  mR429Ok = R427Poll (R429_SOR_TEST, 3U << 8, 2U << 8, 500000);
+  mR429Test = R427Rd (R429_SOR_TEST);
+  Print (L"R429 SOR1 head %s (TEST=%08x)\r\n", mR429Ok ? L"AWAKE: attached to DC-B" : L"did NOT wake", mR429Test);
+  R429SorDump (L"attached");
+  R429DcDump (L"attached");
+  if (R427DpcdR (0x200, Ls, 6))
+    Print (L"R429 DPCD 200..205: sink count %02x irq %02x lanes %02x %02x align %02x sink %02x\r\n",
+           Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
+  mR429Step = mR429Ok ? L"DONE" : L"NOT-AWAKE";
+
+  for (I = 0; I < 4; ++I) {
+    R429SetColor (Colors[I]);
+    Print (L"R429 TV should now show %s (BG=%08x)\r\n", Names[I], Colors[I]);
+    if (I < 3) gBS->Stall (2000000);
+  }
+}
+
+STATIC VOID R429PrintSummary (VOID) {
+  if (mR429Step == NULL) return;
+  Print (L"R429 DP-VIDEO: %s at %s; 1280x720@60 TU %u act %u frac %u wm %u; SOR TEST %08x\r\n",
+         mR429Ok ? L"DONE" : L"STOPPED", mR429Step, mR429Tu, mR429Act, mR429Frac, mR429Wm, mR429Test);
+}
+
 STATIC VOID R424DpAltStage1 (VOID) {
   CONST UINT8 DiscId[6]   = { BM_OUTGOING_VDM, 4, 0x01, 0x80, 0x00, 0xFF };
   CONST UINT8 EnterNin[6] = { BM_OUTGOING_VDM, 4, 0x04, 0x81, 0x7E, 0x05 };
@@ -5840,6 +6167,7 @@ R424Watch:
   R424PrintState (L"end");
   R426DpAuxStage2a ();
   if (mR426Ok) R427DpLinkStage2b ();
+  if (mR427Ok) R429DpVideoStage3 ();
 }
 
 STATIC VOID R424PrintSummary (VOID) {
@@ -6037,13 +6365,14 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R428H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R429H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
   Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
   Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
+  Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
@@ -6322,6 +6651,7 @@ R288Cleanup:
   R424PrintSummary ();
   R426PrintSummary ();
   R427PrintSummary ();
+  R429PrintSummary ();
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

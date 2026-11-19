@@ -75,6 +75,13 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 
 ### 段階 3: DC-B から外部画面へ
 1. UEFI: DC-B のクロック(disp2、PLLD2)、ウィンドウ A に単色や UEFI の画面のコピーを出す。SOR1 の DP 出力を DC-B につなぐ。テレビに絵が出たら成功。
+
+**R429 / R429H(段階 3-1 の最初の試し):** まずはフレームバッファもメモリ クライアントも使わず、DC-B の**背景色**だけを出す(ウィンドウはすべて無効)。
+- DISB パーティションの電源を入れ(PMC、id 19)、disp2 のクロックを入れてリセットを解く。クロックは PLLD2 を使わず、PLLP(408 MHz)をシフトクロック分周 5.5 で割って 74.18 MHz にする(CEA 1280x720@60 の 74.25 MHz との差は 0.1%)。
+- DC-B のタイミング: 1280x720、HFP 110 / HSYNC 40 / HBP 220、VFP 5 / VSYNC 5 / VBP 20、REF_TO_SYNC 1/1、BASE888。
+- SOR1: coreboot の tegra_dc_dp_calc_config を移植して、TU サイズ、active count/frac、watermark、hblank/vblank のシンボル数を決める。STATE1 は head 1、DP-A、24 bpp、同期は正極性。HEAD_STATE1〜5 は head 1 用(+1 の位置)。
+- つなぎ方は coreboot の tegra_dc_sor_attach と同じ順番。DC の WIN_OPTIONS は SOR1_ENABLE(bit 26)。
+- 成功の目安: `R429 SOR1 head AWAKE`、テレビに赤 → 緑 → 青 → 白が 2 秒ずつ出て、最後は白のまま残る(色の並びは BG レジスタの形式しだいで入れ替わるかもしれない)。
 2. Windows: switchdisplay の 2 つ目の出力(2 つ目の VidPN source/target)。モードは EDID から。最初は複製(内蔵と同じ 1280x720)で始め、拡張はそのあと。ホットプラグは BM92T の ALERT と HPD から。
 3. Windows の BM92T: 今は switchbattery v4 が STATUS1 を読み、DR_SWAP をする。DP Alt Mode の状態(ドックの抜き差し)を扱うのは 1 つのドライバーにまとめる必要がある(ALERT を読むと消えるため、2 つのドライバーが読むと取り合いになる)。
 

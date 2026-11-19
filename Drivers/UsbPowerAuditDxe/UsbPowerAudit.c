@@ -5370,9 +5370,28 @@ STATIC BOOLEAN R427PllDp (VOID) {
   UINTN T;
   Print (L"R427 PLLDP before: BASE=%08x MISC=%08x SS_CFG=%08x\r\n", B, Car[R427_PLLDP_MISC / 4],
          Car[R427_PLLDP_SS_CFG / 4]);
-  if ((B & R427_PLL_ENABLE) != 0 && (B & R427_PLL_LOCK) != 0) {
-    Print (L"R427 PLLDP already on and locked; kept.\r\n");
-    return TRUE;
+  // R428: R427H on hardware found PLLDP already on (BASE 0x58103B02: M=2
+  // N=59 P=3 -> 377.6 MHz, left by an earlier loader) and kept it; CR then
+  // passed but EQ never got symbol lock. Keep it only when it is exactly
+  // the 270 MHz setting below, otherwise switch it off and program it again.
+  {
+    UINT32 M = B & 0xFFU, N = (B >> 8) & 0xFFU, Ph = (B >> 19) & 0x1FU;
+    CONST UINT8 Pdiv[12] = { 1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16 };
+    UINT32 Pd = (Ph < 12) ? Pdiv[Ph] : 0;
+    if (M != 0 && Pd != 0)
+      Print (L"R428 PLLDP found M=%u N=%u P=%u -> about %u MHz (SDM %s)\r\n", M, N, Pd,
+             (38400U / M * N / Pd) / 1000U, (Car[R427_PLLDP_SS_CFG / 4] & (1U << 31)) ? L"on" : L"off");
+    if ((B & R427_PLL_ENABLE) != 0 && (B & R427_PLL_LOCK) != 0 && M == 1 && N == 28 && Ph == 3 &&
+        (Car[R427_PLLDP_SS_CFG / 4] & (1U << 31)) != 0) {
+      Print (L"R427 PLLDP already at 270 MHz and locked; kept.\r\n");
+      return TRUE;
+    }
+    if ((B & R427_PLL_ENABLE) != 0) {
+      Print (L"R428 PLLDP is on with another setting: switching it off and programming 270 MHz.\r\n");
+      Car[R427_PLLDP_BASE / 4] = B & ~R427_PLL_ENABLE;
+      gBS->Stall (10);
+      B = Car[R427_PLLDP_BASE / 4];
+    }
   }
   Car[R427_PLLDP_BASE / 4] = (B | R427_PLL_IDDQ) & ~(R427_PLL_LOCK_OVERRIDE | R427_PLL_ENABLE);
   Car[R427_PLLDP_MISC / 4] = 0x40000020U;
@@ -6018,12 +6037,13 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R427H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R428H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
   Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
+  Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

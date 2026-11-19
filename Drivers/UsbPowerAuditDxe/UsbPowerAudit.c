@@ -5658,7 +5658,8 @@ STATIC VOID R427PrintSummary (VOID) {
 #define R429_DC_BASE            0x54240000UL
 #define R429_CAR_RST_DEV_L      0x004U
 #define R429_CAR_CLK_OUT_ENB_L  0x010U
-#define R429_CAR_SRC_DISP2      0x140U
+#define R429_CAR_SRC_DISP1      0x138U
+#define R429_CAR_SRC_DISP2      0x13CU   // R430: was 0x140 in R429 (wrong register)
 #define R429_CAR_RST_DEV_L_SET  0x300U
 #define R429_CAR_RST_DEV_L_CLR  0x304U
 #define R429_CAR_CLK_ENB_L_SET  0x320U
@@ -5670,7 +5671,9 @@ STATIC VOID R427PrintSummary (VOID) {
 // DC word registers
 #define R429_DC_DISP_CMD        0x032U
 #define R429_DC_POWER_CTRL      0x036U
+#define R429_DC_INT_STATUS      0x037U
 #define R429_DC_INT_MASK        0x038U
+#define R429_DC_INT_ENABLE      0x039U
 #define R429_DC_STATE_ACCESS    0x040U
 #define R429_DC_STATE_CTRL      0x041U
 #define R429_DC_WIN_HEADER      0x042U
@@ -5821,6 +5824,8 @@ STATIC BOOLEAN R429PowerDcb (VOID) {
   volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
   UINTN T;
 
+  Print (L"R430 SRC_DISP1=%08x SRC_DISP2(0x13C)=%08x old R429 reg 0x140=%08x\r\n",
+         Car[R429_CAR_SRC_DISP1 / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[0x140 / 4]);
   Print (L"R429 before: PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
          Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
          Car[R429_CAR_RST_DEV_L / 4]);
@@ -5874,6 +5879,7 @@ STATIC VOID R429DpVideoStage3 (VOID) {
 
   mR429Step = L"DCB-MODE";
   R429DcWr (R429_DC_INT_MASK, 0);
+  R429DcWr (R429_DC_INT_ENABLE, 6U);                // R430: frame end + vblank status only (masked)
   R429DcWr (R429_DC_STATE_ACCESS, 0);
   for (I = 0; I < 3; ++I) {
     R429DcWr (R429_DC_WIN_HEADER, 0x10U << I);
@@ -5954,6 +5960,11 @@ STATIC VOID R429DpVideoStage3 (VOID) {
   Print (L"R429 SOR1 head %s (TEST=%08x)\r\n", mR429Ok ? L"AWAKE: attached to DC-B" : L"did NOT wake", mR429Test);
   R429SorDump (L"attached");
   R429DcDump (L"attached");
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  gBS->Stall (100000);
+  V = R429DcRd (R429_DC_INT_STATUS);
+  Print (L"R430 DC-B INT_STATUS after 100 ms=%08x: %s\r\n", V,
+         (V & 2U) ? L"frames are running (pixel clock OK)" : L"NO frame end - DC-B is not scanning");
   if (R427DpcdR (0x200, Ls, 6))
     Print (L"R429 DPCD 200..205: sink count %02x irq %02x lanes %02x %02x align %02x sink %02x\r\n",
            Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
@@ -5964,6 +5975,9 @@ STATIC VOID R429DpVideoStage3 (VOID) {
     Print (L"R429 TV should now show %s (BG=%08x)\r\n", Names[I], Colors[I]);
     if (I < 3) gBS->Stall (2000000);
   }
+  if (R427DpcdR (0x200, Ls, 6))
+    Print (L"R430 DPCD 200..205 at end: sink count %02x irq %02x lanes %02x %02x align %02x sink status %02x (01 = stream in sync)\r\n",
+           Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
 }
 
 STATIC VOID R429PrintSummary (VOID) {
@@ -6365,14 +6379,15 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R429H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R430H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
   Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
   Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
-  Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
+  Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
+  Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

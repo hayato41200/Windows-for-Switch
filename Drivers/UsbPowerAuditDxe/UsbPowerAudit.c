@@ -4947,6 +4947,287 @@ STATIC BOOLEAN R424ReadGenericModes (VOID) {
   return FALSE;
 }
 
+// R426: USB-C DisplayPort Alt Mode, stage 2a (DPAUX1 only; nothing is sent
+// on the main link). Runs right after a successful R424 stage 1 (DP_EN set).
+// Follows L4T drivers/video/tegra/dc/dpaux.c + dp.c (switch-l4t-kernel-nvidia):
+//   SOR power partition must already be on (it also holds DSI, so the panel
+//   keeps it on); CAR: sor_safe (CLK_ENB_Y bit 30) and dpaux1 (CLK_ENB_Y bit 15)
+//   on, dpaux1 reset pulse (RST_DEV_Y bit 15); DPAUX1 (0x54040000) prod
+//   HYBRID_PADCTL mask 0x37FE = 0x24C2 (L4T DT, DP mode), pad mode AUX, pad
+//   power up (HYBRID_SPARE = 0), HPD_CONFIG plug 250 / unplug 2000,
+//   HPD_IRQ_CONFIG 250. Then HPD from DPAUX_DP_AUXSTAT bit 28, DPCD 0x000-0x00F
+//   and 0x200-0x205 by native AUX reads, and EDID block 0 from I2C 0x50 by
+//   I2C-over-AUX (MOT write offset 0, MOT reads of 16, address-only I2C read
+//   as stop). Registers are word offsets x 4 as in dpaux_regs.h.
+#define R426_DPAUX1_BASE        0x54040000UL
+#define R426_CAR_CLK_OUT_ENB_Y  0x298U
+#define R426_CAR_CLK_ENB_Y_SET  0x29CU
+#define R426_CAR_RST_DEV_Y      0x2A4U
+#define R426_CAR_RST_DEV_Y_SET  0x2A8U
+#define R426_CAR_RST_DEV_Y_CLR  0x2ACU
+#define R426_Y_DPAUX1           (1U << 15)
+#define R426_Y_SOR_SAFE         (1U << 30)
+#define R426_PMC_PWRGATE_STATUS 0x38U
+#define R426_PG_SOR             (1U << 17)
+#define R426_AUXDATA_WR(i)      ((0x09U + 4U * (i)) * 4U)
+#define R426_AUXDATA_RD(i)      ((0x19U + 4U * (i)) * 4U)
+#define R426_AUXADDR            (0x29U * 4U)
+#define R426_AUXCTL             (0x2DU * 4U)
+#define R426_AUXSTAT            (0x31U * 4U)
+#define R426_HPD_CONFIG         (0x3DU * 4U)
+#define R426_HPD_IRQ_CONFIG     (0x41U * 4U)
+#define R426_HYBRID_PADCTL      (0x49U * 4U)
+#define R426_HYBRID_SPARE       (0x4DU * 4U)
+#define R426_CMD_I2CWR          (0U << 12)
+#define R426_CMD_I2CRD          (1U << 12)
+#define R426_CMD_MOTWR          (4U << 12)
+#define R426_CMD_MOTRD          (5U << 12)
+#define R426_CMD_AUXWR          (8U << 12)
+#define R426_CMD_AUXRD          (9U << 12)
+#define R426_CTL_ADDR_ONLY      (1U << 8)
+#define R426_CTL_TRANSACTREQ    (1U << 16)
+#define R426_STAT_HPD           (1U << 28)
+#define R426_STAT_ERRORS        (0xFU << 8)
+#define R426_STAT_REPLY_MASK    (0xFU << 16)
+#define R426_STAT_NACK          (1U << 16)
+#define R426_STAT_DEFER         (2U << 16)
+#define R426_STAT_I2CNACK       (4U << 16)
+#define R426_STAT_I2CDEFER      (8U << 16)
+
+STATIC CONST CHAR16 *mR426Step = NULL;
+STATIC BOOLEAN mR426Ok;
+STATIC BOOLEAN mR426Hpd;
+STATIC UINT8 mR426Dpcd[16];
+STATIC BOOLEAN mR426DpcdOk;
+STATIC BOOLEAN mR426EdidOk;
+STATIC CHAR16 mR426Mfg[4];
+STATIC CHAR16 mR426Name[14];
+STATIC UINT32 mR426W, mR426H, mR426Hz;
+
+STATIC UINT32 R426Rd (UINT32 Off) {
+  return ((volatile UINT32 *)R426_DPAUX1_BASE)[Off / 4];
+}
+
+STATIC VOID R426Wr (UINT32 Off, UINT32 Val) {
+  ((volatile UINT32 *)R426_DPAUX1_BASE)[Off / 4] = Val;
+}
+
+// One AUX transaction of up to 16 bytes (0 = address only), with the L4T
+// retry rules (3 for errors, 7 for defers). Returns TRUE on ACK.
+STATIC BOOLEAN R426AuxXfer (UINT32 Cmd, UINT32 Addr, UINT8 *Data, UINTN Size, BOOLEAN Write,
+                            UINT32 *Stat, UINTN *Got) {
+  UINT32 Ctl, St = 0, W[4];
+  UINTN T, Errs = 0, Defers = 0, I, N;
+  if (Size > 16) return FALSE;
+  if (Got != NULL) *Got = 0;
+  Ctl = R426Rd (R426_AUXCTL);
+  Ctl &= ~(0xFFU | R426_CTL_ADDR_ONLY | (0xFU << 12));
+  Ctl |= Cmd | (UINT32)(Size ? Size - 1 : 0) | (Size == 0 ? R426_CTL_ADDR_ONLY : 0);
+  R426Wr (R426_AUXCTL, Ctl);
+  R426Wr (R426_AUXADDR, Addr);
+  if (Write && Size != 0 && Data != NULL) {
+    ZeroMem (W, sizeof (W));
+    CopyMem (W, Data, Size);
+    for (I = 0; I < 4; ++I) R426Wr (R426_AUXDATA_WR (I), W[I]);
+  }
+  for (;;) {
+    St = R426Rd (R426_AUXSTAT);
+    if ((St & R426_STAT_HPD) == 0) { *Stat = St; return FALSE; }
+    R426Wr (R426_AUXCTL, R426Rd (R426_AUXCTL) | R426_CTL_TRANSACTREQ);
+    for (T = 0; T < 10000 && (R426Rd (R426_AUXCTL) & R426_CTL_TRANSACTREQ) != 0; ++T)
+      gBS->Stall (100);
+    St = R426Rd (R426_AUXSTAT);
+    *Stat = St;
+    if ((St & R426_STAT_ERRORS) != 0 ||
+        (Write && (St & (R426_STAT_NACK | R426_STAT_I2CNACK)) != 0)) {
+      if (Errs++ < 3) { R426Wr (R426_AUXSTAT, St); gBS->Stall (400); continue; }
+      return FALSE;
+    }
+    if ((St & (R426_STAT_DEFER | R426_STAT_I2CDEFER)) != 0) {
+      if (Defers++ < 7) { R426Wr (R426_AUXSTAT, St); gBS->Stall (400); continue; }
+      return FALSE;
+    }
+    if ((St & R426_STAT_REPLY_MASK) != 0) return FALSE;
+    if (!Write && Data != NULL && Size != 0) {
+      for (I = 0; I < 4; ++I) W[I] = R426Rd (R426_AUXDATA_RD (I));
+      N = St & 0xFFU;
+      if (N > Size) N = Size;
+      CopyMem (Data, W, N);
+      if (Got != NULL) *Got = N;
+    }
+    return TRUE;
+  }
+}
+
+STATIC VOID R426Hex (CONST CHAR16 *Tag, CONST UINT8 *B, UINTN N) {
+  UINTN I;
+  Print (L"R426 %s:", Tag);
+  for (I = 0; I < N; ++I) Print (L" %02x", B[I]);
+  Print (L"\r\n");
+}
+
+STATIC BOOLEAN R426ReadEdid (UINT8 *Edid) {
+  UINT8 Off = 0;
+  UINT32 St = 0;
+  UINTN Done = 0, Got, Tries = 0;
+  BOOLEAN Ok = TRUE;
+  if (!R426AuxXfer (R426_CMD_MOTWR, 0x50, &Off, 1, TRUE, &St, NULL)) {
+    Print (L"R426 EDID offset write (I2C 0x50) FAIL AUXSTAT=%08x\r\n", St);
+    R426AuxXfer (R426_CMD_I2CRD, 0x50, NULL, 0, FALSE, &St, NULL);
+    return FALSE;
+  }
+  while (Done < 128 && Tries++ < 32) {
+    if (!R426AuxXfer (R426_CMD_MOTRD, 0x50, Edid + Done, 16, FALSE, &St, &Got)) {
+      Print (L"R426 EDID read at %u FAIL AUXSTAT=%08x\r\n", (UINT32)Done, St);
+      Ok = FALSE;
+      break;
+    }
+    Done += Got;
+  }
+  R426AuxXfer (R426_CMD_I2CRD, 0x50, NULL, 0, FALSE, &St, NULL);   // stop
+  return Ok && Done >= 128;
+}
+
+STATIC VOID R426ParseEdid (CONST UINT8 *E) {
+  CONST UINT8 Hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+  UINT8 Sum = 0;
+  UINTN I, K, J;
+  UINT16 M;
+  UINT32 Pclk, Ha, Hb, Va, Vb, Tot;
+  CONST UINT8 *D;
+  for (I = 0; I < 128; ++I) Sum = (UINT8)(Sum + E[I]);
+  if (CompareMem (E, Hdr, 8) != 0) {
+    Print (L"R426 EDID: bad header\r\n");
+    return;
+  }
+  M = (UINT16)((E[8] << 8) | E[9]);
+  mR426Mfg[0] = (CHAR16)(L'A' - 1 + ((M >> 10) & 0x1F));
+  mR426Mfg[1] = (CHAR16)(L'A' - 1 + ((M >> 5) & 0x1F));
+  mR426Mfg[2] = (CHAR16)(L'A' - 1 + (M & 0x1F));
+  mR426Mfg[3] = 0;
+  mR426Name[0] = 0;
+  for (K = 0; K < 4; ++K) {
+    D = E + 54 + 18 * K;
+    if (D[0] == 0 && D[1] == 0 && D[2] == 0 && D[3] == 0xFC) {
+      for (J = 0; J < 13 && D[5 + J] != 0x0A && D[5 + J] != 0; ++J)
+        mR426Name[J] = (CHAR16)((D[5 + J] >= 0x20 && D[5 + J] < 0x7F) ? D[5 + J] : '?');
+      mR426Name[J] = 0;
+    }
+  }
+  D = E + 54;
+  Pclk = (UINT32)(D[0] | (D[1] << 8));      // 10 kHz units
+  if (Pclk != 0) {
+    Ha = D[2] | ((UINT32)(D[4] >> 4) << 8);
+    Hb = D[3] | ((UINT32)(D[4] & 0xF) << 8);
+    Va = D[5] | ((UINT32)(D[7] >> 4) << 8);
+    Vb = D[6] | ((UINT32)(D[7] & 0xF) << 8);
+    mR426W = Ha;
+    mR426H = Va;
+    Tot = (Ha + Hb) * (Va + Vb);
+    mR426Hz = (Tot != 0) ? (Pclk * 10000U + Tot / 2) / Tot : 0;
+    Print (L"R426 EDID preferred: %ux%u @ %u Hz (pixel clock %u.%02u MHz)\r\n",
+           Ha, Va, mR426Hz, Pclk / 100, Pclk % 100);
+  }
+  Print (L"R426 EDID: maker %s product %04x name \"%s\" version %u.%u extensions %u checksum %s\r\n",
+         mR426Mfg, (UINT32)(E[10] | (E[11] << 8)), mR426Name, E[18], E[19], E[126],
+         Sum == 0 ? L"OK" : L"BAD");
+  mR426EdidOk = (Sum == 0);
+}
+
+STATIC VOID R426DpAuxStage2a (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINT32 Pg, ClkY, RstY, Pad, St = 0, Pm, Cnf;
+  UINT8 Edid[128], Sink[6];
+  UINTN I;
+  BOOLEAN PccHpd;
+
+  Print (L"\r\n---- R426 DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID) ----\r\n");
+  mR426Step = L"SOR-PARTITION";
+  Pg = Pmc[R426_PMC_PWRGATE_STATUS / 4];
+  ClkY = Car[R426_CAR_CLK_OUT_ENB_Y / 4];
+  RstY = Car[R426_CAR_RST_DEV_Y / 4];
+  Print (L"R426 PWRGATE_STATUS=%08x (SOR partition %s) CLK_ENB_Y=%08x RST_DEV_Y=%08x\r\n",
+         Pg, (Pg & R426_PG_SOR) ? L"on" : L"OFF", ClkY, RstY);
+  if ((Pg & R426_PG_SOR) == 0) {
+    Print (L"R426 SOR partition is off; DPAUX1 not touched.\r\n");
+    return;
+  }
+
+  mR426Step = L"DPAUX1-CLOCK";
+  Car[R426_CAR_CLK_ENB_Y_SET / 4] = R426_Y_SOR_SAFE | R426_Y_DPAUX1;
+  gBS->Stall (10);
+  Car[R426_CAR_RST_DEV_Y_SET / 4] = R426_Y_DPAUX1;
+  gBS->Stall (2000);
+  Car[R426_CAR_RST_DEV_Y_CLR / 4] = R426_Y_DPAUX1;
+  gBS->Stall (1000);
+  Print (L"R426 after clock/reset: CLK_ENB_Y=%08x RST_DEV_Y=%08x\r\n",
+         Car[R426_CAR_CLK_OUT_ENB_Y / 4], Car[R426_CAR_RST_DEV_Y / 4]);
+
+  mR426Step = L"DPAUX1-PAD";
+  Pad = R426Rd (R426_HYBRID_PADCTL);
+  Print (L"R426 DPAUX1 before: PADCTL=%08x SPARE=%08x AUXCTL=%08x AUXSTAT=%08x\r\n",
+         Pad, R426Rd (R426_HYBRID_SPARE), R426Rd (R426_AUXCTL), R426Rd (R426_AUXSTAT));
+  Pad = (Pad & ~0x37FEU) | 0x24C2U;              // L4T prod (DP)
+  Pad &= ~((1U << 15) | (1U << 14) | 1U);        // pad mode AUX (not I2C)
+  R426Wr (R426_HYBRID_PADCTL, Pad);
+  R426Wr (R426_HYBRID_SPARE, 0);                 // pad power up
+  R426Wr (R426_HPD_CONFIG, 250U | (2000U << 16));
+  R426Wr (R426_HPD_IRQ_CONFIG, 250U);
+  gBS->Stall (10000);
+
+  mR426Step = L"HPD";
+  for (I = 0; I < 30; ++I) {
+    St = R426Rd (R426_AUXSTAT);
+    if ((St & R426_STAT_HPD) != 0) break;
+    gBS->Stall (100000);
+  }
+  mR426Hpd = (St & R426_STAT_HPD) != 0;
+  R424ReadHpd (&Pm, &Cnf, &PccHpd);
+  Print (L"R426 DPAUX1 after: PADCTL=%08x SPARE=%08x AUXSTAT=%08x HPD(DPAUX)=%u after %u ms, HPD(PCC1 GPIO)=%u\r\n",
+         R426Rd (R426_HYBRID_PADCTL), R426Rd (R426_HYBRID_SPARE), St, mR426Hpd, (UINT32)(I * 100), PccHpd);
+  if (!mR426Hpd) {
+    Print (L"R426 no HPD on DPAUX1 (TV off or no DP from the dock?). Stopped.\r\n");
+    return;
+  }
+
+  mR426Step = L"DPCD";
+  if (!R426AuxXfer (R426_CMD_AUXRD, 0x000, mR426Dpcd, 16, FALSE, &St, &I) || I < 3) {
+    Print (L"R426 DPCD 0x000 read FAIL AUXSTAT=%08x got %u\r\n", St, (UINT32)I);
+    return;
+  }
+  mR426DpcdOk = TRUE;
+  R426Hex (L"DPCD 000-00F", mR426Dpcd, 16);
+  Print (L"R426 DPCD rev %u.%u, max link rate %02x (06=1.62 0A=2.7 14=5.4 Gbps/lane), max lanes %u%s, downstream port %s\r\n",
+         mR426Dpcd[0] >> 4, mR426Dpcd[0] & 0xF, mR426Dpcd[1], mR426Dpcd[2] & 0x1F,
+         (mR426Dpcd[2] & 0x80) ? L" (enhanced framing)" : L"",
+         (mR426Dpcd[5] & 1) ? L"present" : L"none");
+  if (R426AuxXfer (R426_CMD_AUXRD, 0x200, Sink, 6, FALSE, &St, &I))
+    R426Hex (L"DPCD 200-205 (sink count, IRQ, lane status)", Sink, I);
+
+  mR426Step = L"EDID";
+  ZeroMem (Edid, sizeof (Edid));
+  if (!R426ReadEdid (Edid)) return;
+  for (I = 0; I < 128; I += 32) {
+    Print (L"R426 EDID %02x:", (UINT32)I);
+    { UINTN J; for (J = 0; J < 32; ++J) Print (L"%02x", Edid[I + J]); }
+    Print (L"\r\n");
+  }
+  R426ParseEdid (Edid);
+  if (!mR426EdidOk) return;
+  mR426Step = L"DONE";
+  mR426Ok = TRUE;
+}
+
+STATIC VOID R426PrintSummary (VOID) {
+  if (mR426Step == NULL) return;
+  Print (L"R426 DPAUX: %s at %s; HPD=%u; DPCD rev %02x rate %02x lanes %u; EDID %s \"%s\" %ux%u@%u\r\n",
+         mR426Ok ? L"DONE" : L"STOPPED", mR426Step, mR426Hpd,
+         mR426DpcdOk ? mR426Dpcd[0] : 0, mR426DpcdOk ? mR426Dpcd[1] : 0,
+         mR426DpcdOk ? (mR426Dpcd[2] & 0x1F) : 0,
+         mR426EdidOk ? mR426Mfg : L"-", mR426Name, mR426W, mR426H, mR426Hz);
+}
+
 STATIC VOID R424DpAltStage1 (VOID) {
   CONST UINT8 DiscId[6]   = { BM_OUTGOING_VDM, 4, 0x01, 0x80, 0x00, 0xFF };
   CONST UINT8 EnterNin[6] = { BM_OUTGOING_VDM, 4, 0x04, 0x81, 0x7E, 0x05 };
@@ -5140,6 +5421,7 @@ R424Watch:
     }
   }
   R424PrintState (L"end");
+  R426DpAuxStage2a ();
 }
 
 STATIC VOID R424PrintSummary (VOID) {
@@ -5337,10 +5619,11 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R425H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R426H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
+  Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
@@ -5617,6 +5900,7 @@ R288Cleanup:
          mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"",
          mR413PadctlReleased ? L" PADCTL reset released" : L"");
   R424PrintSummary ();
+  R426PrintSummary ();
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

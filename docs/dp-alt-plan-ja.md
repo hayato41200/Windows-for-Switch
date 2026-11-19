@@ -45,7 +45,12 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 
 テレビには、この段階ではまだ何も映りません(SoC の DP 出力を何も動かしていないため)。
 
+**実機の結果(2026-11-19、R425H、ドック(非純正、VID/PID は 057E:2003)+ テレビ):** Nintendo Alt Mode に入れた。0x3131 と 0x3636 はどちらも lastcmd=0。DP_STATUS は C01A → C09A(DP_EN=1、INSERT=1、SIGNAL=1、PINCFG=1)。ドックの状態、LED、ハブの VDM はどれも ACK。HPD(PCC1 の GPIO)は 0 のままだった(ピンは SFIO で、GPIO の CNF に bit1 が入っていない)。段階 1 は通った。
+
 ### 段階 2: DPAUX1 と SOR1(UEFI)
+**段階 2a(R426 / R426H):** 下の 1〜3。R424 の段階 1 が DONE のときだけ、続けて実行する。SOR のパーティションがオンであることを確かめる(DSI もここにあるので、内蔵パネルが動いていればオンのはず)。次に CAR の sor_safe(Y bit 30)と dpaux1(Y bit 15)をオンにし、dpaux1 をリセットし直す。そのあと prod、AUX モード、パッドの電源、HPD_CONFIG を設定し、AUXSTAT の bit 28 で HPD を読む。続けて DPCD の 0x000〜0x00F と 0x200〜0x205、EDID のブロック 0 を読む。成功の目安は、まとめの行が `R426 DPAUX: DONE at DONE` になり、テレビの名前と推奨の解像度が出ること。
+**段階 2b:** 下の 4〜5(SOR1 とリンクトレーニング)。
+
 1. DPAUX1: クロックとリセット(CAR)、パッドの電源(`DPAUX_HYBRID_SPARE`)、prod の値、DP のパッドモード。HPD を `DPAUX_DP_AUXSTAT` bit 28 で読む(段階 1 の PCC1 と一致すること)。
 2. AUX で DPCD を読む(0x000〜0x00F: DPCD rev、最大リンク速度、レーン数)。ドックの DP→HDMI 変換チップが答えるはず。
 3. AUX の I2C-over-AUX で EDID(0x50)を読み、テレビの名前と推奨の解像度を表示する。

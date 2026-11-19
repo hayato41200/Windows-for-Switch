@@ -64,6 +64,7 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 
 **実機の結果(2026-11-19、R427H):** SOR1 の起動、校正、パッド、レーンの起動は、どれも通った。CR は 2.7 Gbps でも 1.62 Gbps でも、1 回目で 0x11 になった(要求は vs0/pe1)。EQ は 6 回とも 0x11 のままで、シンボルロックも EQ 完了も立たなかった。PLLDP は前のローダーが動かしたままで(BASE 0x58103B02 = M2 N59 P3、約 378 MHz)、R427 はそれをそのまま使っていた。リンクの速度が約 1.4 倍ずれていたのが原因の候補。
 **R428 / R428H:** PLLDP が 270 MHz の設定(M1 N28 P4、SDM オン)でなければ、いったん止めて設定し直す。
+**実機の結果(2026-11-19、R428H):** 前のローダーの PLLDP は M2 N56 P3、SDM オフ(約 358 MHz)だった。止めて 270 MHz に設定し直すと、10 us で lock=1(BASE 0x58101C01)。CR は 2 回目で 0x11(vs0/pe1)、EQ は 1 回目で **0x77 / align 0x81**。`R427 LINK TRAINED: 2.7 Gbps x 2 lanes`。LINKCTL 0x00034101、PADCTL 0x00C03003。PLLDP を設定し直しても本体の画面は乱れなかった。**段階 2b 完了。**
 
 1. DPAUX1: クロックとリセット(CAR)、パッドの電源(`DPAUX_HYBRID_SPARE`)、prod の値、DP のパッドモード。HPD を `DPAUX_DP_AUXSTAT` bit 28 で読む(段階 1 の PCC1 と一致すること)。
 2. AUX で DPCD を読む(0x000〜0x00F: DPCD rev、最大リンク速度、レーン数)。ドックの DP→HDMI 変換チップが答えるはず。

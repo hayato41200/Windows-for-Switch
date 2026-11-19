@@ -5921,6 +5921,97 @@ STATIC VOID R429SetColor (UINT32 Color) {
   R429DcWr (R429_DC_STATE_CTRL, 1U);
 }
 
+//
+// R434: stage 3-2 - mirror the UEFI screen on the TV. DC-B window A scans out
+// the same framebuffer as DC-A window A (address, format, stride read back
+// from DC-A; hekate di.inl _di_winA_pitch layout). The 720x1280 portrait
+// picture is scaled to 405x720 with the DDA and centred, background black.
+//
+#define R434_DCA_BASE        0x54200000UL
+#define R434_WIN_BUF_CTRL    0x702U
+#define R434_WIN_DEPTH       0x703U
+#define R434_WIN_POSITION    0x704U
+#define R434_WIN_SIZE        0x705U
+#define R434_WIN_PRESCALED   0x706U
+#define R434_WIN_H_DDA0      0x707U
+#define R434_WIN_V_DDA0      0x708U
+#define R434_WIN_DDA_INC     0x709U
+#define R434_WIN_STRIDE      0x70AU
+#define R434_WIN_DV_CTRL     0x70EU
+#define R434_WIN_BLEND       0x716U
+#define R434_WINBUF_START    0x800U
+#define R434_WINBUF_H_OFF    0x806U
+#define R434_WINBUF_V_OFF    0x808U
+#define R434_WINBUF_KIND     0x80BU
+#define R434_WINBUF_START_HI 0x80DU
+STATIC BOOLEAN mR434Shown;
+STATIC UINT32 mR434Fb, mR434Uf;
+
+STATIC VOID R434ShowUefi (VOID) {
+  volatile UINT32 *DcA = (volatile UINT32 *)R434_DCA_BASE;
+  UINT32 Hdr, Fb, Depth, Stride, Pre, Size, Opt, SrcW, SrcH, OutW, X, V;
+
+  Hdr = DcA[R429_DC_WIN_HEADER];
+  DcA[R429_DC_WIN_HEADER] = 0x10;
+  Fb = DcA[R434_WINBUF_START];
+  Depth = DcA[R434_WIN_DEPTH];
+  Stride = DcA[R434_WIN_STRIDE];
+  Pre = DcA[R434_WIN_PRESCALED];
+  Size = DcA[R434_WIN_SIZE];
+  Opt = DcA[R429_DC_WIN_OPT];
+  DcA[R429_DC_WIN_HEADER] = Hdr;
+  Print (L"R434 DC-A window A: OPT=%08x FB=%08x DEPTH=%x STRIDE=%08x PRESCALED=%08x SIZE=%08x\r\n",
+         Opt, Fb, Depth, Stride, Pre, Size);
+  SrcW = (Pre & 0x7FFFU) / 4U;
+  SrcH = (Pre >> 16) & 0x1FFFU;
+  if (Fb == 0 || SrcW == 0 || SrcH == 0) {
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+    Fb = 0xF5A00000U;
+#else
+    Fb = 0xDFB80000U;
+#endif
+    Depth = 0xC; SrcW = 720; SrcH = 1280; Stride = 720 * 4;
+    Pre = (SrcH << 16) | (SrcW * 4);
+    Print (L"R434 DC-A window A not readable: using the UEFI default framebuffer %08x\r\n", Fb);
+  }
+  OutW = (SrcW * R429_VACT) / SrcH;
+  if (OutW > R429_HACT) OutW = R429_HACT;
+  X = (R429_HACT - OutW) / 2;
+  mR434Fb = Fb;
+
+  R429DcWr (R429_DC_STATE_ACCESS, 0);
+  R429DcWr (R429_DC_WIN_HEADER, 0x10);
+  R429DcWr (R429_DC_WIN_OPT, 0);
+  R429DcWr (R434_WIN_DEPTH, Depth);
+  R429DcWr (R434_WIN_POSITION, X);
+  R429DcWr (R434_WIN_H_DDA0, 0);
+  R429DcWr (R434_WIN_V_DDA0, 0);
+  R429DcWr (R434_WIN_PRESCALED, Pre);
+  R429DcWr (R434_WIN_DDA_INC, (((SrcH * 4096U) / R429_VACT) << 16) | ((SrcW * 4096U) / OutW));
+  R429DcWr (R434_WIN_SIZE, (R429_VACT << 16) | OutW);
+  R429DcWr (R434_WIN_STRIDE, Stride);
+  R429DcWr (R434_WIN_BUF_CTRL, 0);
+  R429DcWr (R434_WIN_DV_CTRL, 0);
+  R429DcWr (R434_WINBUF_KIND, 0);
+  R429DcWr (R434_WINBUF_START, Fb);
+  R429DcWr (R434_WINBUF_START_HI, 0);
+  R429DcWr (R434_WINBUF_H_OFF, 0);
+  R429DcWr (R434_WINBUF_V_OFF, 0);
+  R429DcWr (R434_WIN_BLEND, (1U << 24) | 255U);
+  R429DcWr (R429_DC_WIN_OPT, 1U << 30);
+  R429DcWr (R429_DC_BG_COLOR, 0xFF000000U);
+  R429DcWr (R429_DC_STATE_CTRL, (1U << 8) | (1U << 9));
+  R429DcWr (R429_DC_STATE_CTRL, 1U | (1U << 1));
+  gBS->Stall (50000);
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  gBS->Stall (100000);
+  V = R429DcRd (R429_DC_INT_STATUS);
+  mR434Uf = V;
+  mR434Shown = TRUE;
+  Print (L"R434 TV should now show the UEFI screen (%ux%u -> %ux%u at x=%u, FB %08x); DC-B INT=%08x%s\r\n",
+         SrcW, SrcH, OutW, (UINT32)R429_VACT, X, Fb, V, (V & (1U << 8)) ? L" WINDOW-A UNDERFLOW" : L"");
+}
+
 STATIC VOID R429DpVideoStage3 (VOID) {
   CONST UINT32 LinkRate = (UINT32)mR427Bw * 27000000U;
   UINT32 Tu, Act, Frac, Pol, Wm, I, Access, Htot, Vtot, V;
@@ -6044,6 +6135,7 @@ STATIC VOID R429DpVideoStage3 (VOID) {
     Print (L"R429 TV should now show %s (BG=%08x)\r\n", Names[I], Colors[I]);
     if (I < 3) gBS->Stall (2000000);
   }
+  R434ShowUefi ();
   // R431: identify the dock's DP->HDMI converter and watch the stream for 20 s
   {
     UINT8 Br[12], Dp[4];
@@ -6076,6 +6168,8 @@ STATIC VOID R429DpVideoStage3 (VOID) {
 
 STATIC VOID R429PrintSummary (VOID) {
   if (mR429Step == NULL) return;
+  if (mR434Shown)
+    Print (L"R434 TV MIRROR: UEFI screen from FB %08x on DC-B window A (INT %08x)\r\n", mR434Fb, mR434Uf);
   Print (L"R429 DP-VIDEO: %s at %s; 1280x720@60 TU %u act %u frac %u wm %u; SOR TEST %08x\r\n",
          mR429Ok ? L"DONE" : L"STOPPED", mR429Step, mR429Tu, mR429Act, mR429Frac, mR429Wm, mR429Test);
 }
@@ -6488,7 +6582,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R433H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R434H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6499,7 +6593,8 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
-  Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R434: the UEFI screen mirrored on the TV (DC-B window A, same framebuffer, scaled 405x720)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");

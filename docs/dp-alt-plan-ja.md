@@ -92,7 +92,9 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 - **R439H + switchdisplay 1.3.0(2026-11-20): Windows の画面がテレビに出た(段階 4a 完了)。** Status: `TV mirror (DP Alt): ON  DC-B cmd 0x20 winopt 0x4000000 active 0x2D00500 buffer 0xFD9F3000`。途中 R435H〜R438H では電源を完全に切ってから起動すると R427 の途中で SError になった。原因は SOR1 のパッドの電源 MAX77620 LDO8「vdd-hdmi-dp」1.05 V(L4T DT の vdd-dp-pad-supply、FPS source none)が切れていたこと。R428H〜R434H は前の起動で入った LDO8 が残っていたから動いていた(終端の調整が 8 ではなく 15 に振り切れるのが目印)。R439H で R427 の最初に LDO8 を入れ、HDMI パッドの DPD を外した。
 2. Windows(段階 4)。3 つに分けて進める。
    - **4a(R435H + switchdisplay 1.3.0): ハードウェアでの複製。** UEFI が DC-B と SOR1 を動かしたまま Windows に渡す(R435H は色と 20 秒の待ちをやめるだけ)。switchdisplay は、CAR で disp2 のクロックが入っていて、DC-B が C_DISPLAY・SOR1・1280x720 のときだけ、自分の 1280x720 のバッファ(連続メモリ、4 GB 未満、write-combined)を DC-B のウィンドウ A に渡し、Present のたびに回転なしで写す。横向き(1280x720)の画面はそのまま、縦向きは 405x720 に縮めて中央。Windows から見える画面は 1 つのまま。止めるときは、UEFI が設定したウィンドウ A(起動時のフレームバッファ)に戻してからバッファを解放する。レジストリ TvMirror=0 で切れる。抜き差しにはまだ対応しない(起動時につないでおく)。
-   - **4b: 抜き差し。** BM92T を読むドライバーを 1 つにまとめ(下の 3)、つないだときに Windows の中で DP Alt Mode・リンクトレーニング・DC-B / SOR1 の設定をする(UEFI の R424〜R433 の手順を移す)。
+   - **4b: 抜き差し。** 2 つに分ける。
+     - **4b-1(switchbattery 1.0.0.7):** BM92T を読むのは switchbattery だけのまま、シンクの設定のあと DFP なら UEFI R424 の手順で DP Alt Mode に入る(ドックを名乗るハブは標準の DP を優先、本物のドックは Nintendo モードとドック用 VDM)。状態はカーネルのコールバック `\Callback\SwitchWoaDpAlt`(Argument1 = 1 入った / 0 抜けた、Argument2 = DP_STATUS)で、変わったときと、入っている間は 5 秒ごとに知らせる。UEFI がすでに入れていれば(DP_EN)知らせるだけ。
+     - **4b-2(switchdisplay):** コールバックを受けて、自分のスレッドで UEFI R426(DPAUX1)・R427(PLLDP、SOR1 のパッド、リンクトレーニング)・R429/R433(DC-B、PLLD2、ラスター、SOR1 の取り付け)をして、4a のウィンドウにつなぐ。抜けたら DC-B を止め、SOR1 をリセットに戻す。SOR1 のパッドの電源 LDO8(I2C5 の PMIC)は Windows からは触れないので、UEFI がテレビの有無にかかわらず起動時に入れておく。
    - **4c: 2 つ目の画面(拡張)。** 2 つ目の VidPN source / target。モードは EDID から。ホットプラグは BM92T の ALERT と HPD から。
 3. Windows の BM92T: 今は switchbattery v4 が STATUS1 を読み、DR_SWAP をする。DP Alt Mode の状態(ドックの抜き差し)を扱うのは 1 つのドライバーにまとめる必要がある(ALERT を読むと消えるため、2 つのドライバーが読むと取り合いになる)。
 

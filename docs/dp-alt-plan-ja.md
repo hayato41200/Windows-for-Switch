@@ -88,6 +88,7 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
 - R430H / R431H: フレームは出ており(INT_STATUS 6)、DPCD 0x200〜0x205 = `01 00 77 00 81 01`(映像に同期)が 20 秒続いたが、テレビは無信号。ハブ(純正ドックではない、DP Alt 対応の USB-C ハブ。MacBook では映る)は 057E:2003 を名乗る。branch OUI 000000、port caps 0B(HDMI)。
 - R432H: ハブは SVID FF01 も持つので、ふつうの DP Alt Mode(ピン D)で入るようにした。それでも無信号。
 - **R433H: テレビに白が出た(テレビの表示は「HDMI 映像 720p」)。** 原因は DC の中の分周。SOR を使うときは DC のクロック = 画素クロックでないといけない(シフトクロック分周 1)。PLLP / 5.5 をやめ、PLLD2 を Linux の表どおり 74.25 MHz(M1 N30 SDM 0x0E00、P16 = hw 11、VCO 1188 MHz)にして、disp2 = pll_d2_out0(mux 5、1:1)。測ったフレームの速さは 60.0 fps。**段階 3-1 完了。**
+- **R434H(2026-11-20): テレビに UEFI の画面が出た。** DC-A のウィンドウ A から FB(DFB80000)、DEPTH(0xC)、STRIDE などを読み、DC-B のウィンドウ A に同じ FB を渡して、720x1280 を 405x720 に縮めて中央(x=437)に置いた。本体に文字が増えるとテレビも一緒に変わる(R431 の毎秒の行もテレビに出た)。DC INT は 6 のままで、ウィンドウ A のアンダーフローは出ていない。MC / SMMU の設定は何もいらなかった。**段階 3-2 完了。**
 2. Windows: switchdisplay の 2 つ目の出力(2 つ目の VidPN source/target)。モードは EDID から。最初は複製(内蔵と同じ 1280x720)で始め、拡張はそのあと。ホットプラグは BM92T の ALERT と HPD から。
 3. Windows の BM92T: 今は switchbattery v4 が STATUS1 を読み、DR_SWAP をする。DP Alt Mode の状態(ドックの抜き差し)を扱うのは 1 つのドライバーにまとめる必要がある(ALERT を読むと消えるため、2 つのドライバーが読むと取り合いになる)。
 

@@ -127,7 +127,11 @@ SMBIOS_TABLE_TYPE0 mBIOSInfoType0 = {
 
 CHAR8 *mBIOSInfoType0Strings[] = {
   "Little Moe, LLC.",					// Vendor String
+#ifdef __SWOA_UEFI_VERSION__
+  "1.09 " __SWOA_UEFI_VERSION__ " (" __IMPL_COMMIT_ID__ ")",	// BiosVersion String: R442H = hekate build R442 (SwitchCenter reads it)
+#else
   "1.09 (" __IMPL_COMMIT_ID__ ")",		// BiosVersion String
+#endif
   __RELEASE_DATE__,						// BiosReleaseDate String
   NULL
 };

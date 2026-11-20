@@ -4716,6 +4716,1732 @@ STATIC BOOLEAN R363ConfigureSink (VOID) {
   return TRUE;
 }
 
+// R424: USB-C DisplayPort Alt Mode, stage 1 (BM92T side only). Runs on the
+// sink path after R363ConfigureSink, i.e. when a power source is attached and
+// the data-role swap made the Switch DFP. It follows the L4T bm92txx state
+// machine (CTCaer switch-l4t-kernel-4.9 drivers/misc/bm92txx.c) by polling the
+// ALERT register instead of the ALERT# interrupt:
+//   Discover Identity -> (Nintendo dock 057E:2003) Enter Nintendo Alt Mode ->
+//   DP_ENTER_MODE (0x3131) -> DP Configure VDO (pin D for 2 lanes, as the L4T
+//   DT rohm,dp-lanes = <2>) + DP_CFG_AND_START_HPD (0x3636) ->
+//   dock device state, dock LED on, dock USB hub on.
+// The BM92T firmware drives the USB-C lane mux and the HPD line by itself
+// after 0x3636 (L4T has no mux driver). Nothing on the SoC display side
+// (SOR1/DPAUX1/DC-B) is touched here: that is stage 2/3. Other partners (a
+// USB-C hub with a charger) only get Discover Identity / SVIDs / DP modes read
+// and printed; no mode is entered for them (R424_GENERIC_DP_ENTER).
+// R425: R424_GENERIC_DP_ENTER = 1. A partner that is not the Nintendo dock but
+// answers Discover Mode (SVID FF01) with UFP_D gets the L4T generic path:
+// DP_ENTER_MODE (0x3131) directly (no Nintendo mode), the DP Configure pin
+// taken from the plug or receptacle field as the partner reports, and no dock
+// VDMs (state / LED / hub are Nintendo-only).
+#define R424_GENERIC_DP_ENTER   1
+#define BM_ALERT_STATUS         0x02
+#define BM_DP_ALERT_EN          0x19
+#define BM_INCOMING_VDM         0x50
+#define BM_OUTGOING_VDM         0x60
+#define BM_ALERT_CMD_DONE       (1U << 2)
+#define BM_ALERT_PLUGPULL       (1U << 3)
+#define BM_ALERT_DP_EVENT       (1U << 6)
+#define BM_ALERT_VDM_RECEIVED   (1U << 11)
+#define BM_CMD_SEND_VDM         0x1111U
+#define BM_CMD_ACCEPT_VDM       0x1616U
+#define BM_CMD_DP_ENTER_MODE    0x3131U
+#define BM_CMD_DP_CFG_START_HPD 0x3636U
+#define BM_DP_STATUS_PIN_CFG    (1U << 1)
+#define BM_DP_STATUS_SIGNAL_ON  (1U << 7)
+#define BM_DP_STATUS_INSERT     (1U << 14)
+#define BM_DP_STATUS_DP_EN      (1U << 15)
+#define R424_VDO_DP_UFP_D       (1U << 0)
+#define R424_VDO_DP_SUPPORT     (1U << 2)
+#define R424_VDO_DP_U_UFP_D     (1U << 1)
+#define R424_VDO_DP_RECEPTACLE  (1U << 6)
+#define R424_VDO_DP_PIN_C       (1U << 2)
+#define R424_VDO_DP_PIN_D       (1U << 3)
+#define R424_DP_LANES           2U
+// HPD from the USB-C side: pin HDMI_INT_DP_HPD (GPIO PCC1), L4T dp-display
+// nvidia,hpd-gpio = <&gpio 0xE1 ...>. Pinmux entry 103 (0x19C), GPIO port CC.
+#define R424_PINMUX_DP_HPD      0x19CU
+#define R424_HPD_BIT            (1U << 1)
+
+typedef enum {
+  R424_NOT_RUN = 0, R424_NOT_DFP, R424_DISC_ID, R424_NOT_DOCK, R424_ENTER_NIN,
+  R424_DP_ENTER, R424_DP_CAPS, R424_DP_CFG, R424_DOCK_STATE, R424_DOCK_LED,
+  R424_DOCK_HUB, R424_DONE
+} R424_STEP;
+
+STATIC R424_STEP mR424Step = R424_NOT_RUN;
+STATIC BOOLEAN mR424Failed;
+STATIC UINT16 mR424Vid, mR424Pid, mR424DpStatus;
+STATIC UINT8 mR424IdType;
+STATIC BOOLEAN mR424Hpd;
+STATIC BOOLEAN mR424Generic;
+STATIC BOOLEAN mR432StdDp;
+
+STATIC CONST CHAR16 *R424StepName (R424_STEP Step) {
+  switch (Step) {
+    case R424_NOT_DFP:    return L"DATA-ROLE (not DFP)";
+    case R424_DISC_ID:    return L"DISCOVER-IDENTITY";
+    case R424_NOT_DOCK:   return L"PARTNER (not a Nintendo dock)";
+    case R424_ENTER_NIN:  return L"ENTER-NINTENDO-MODE";
+    case R424_DP_ENTER:   return L"DP-ENTER-MODE 0x3131";
+    case R424_DP_CAPS:    return L"DP-CAPABILITIES";
+    case R424_DP_CFG:     return L"DP-CONFIGURE+HPD 0x3636";
+    case R424_DOCK_STATE: return L"DOCK-STATE";
+    case R424_DOCK_LED:   return L"DOCK-LED";
+    case R424_DOCK_HUB:   return L"DOCK-USB-HUB";
+    case R424_DONE:       return L"DONE";
+    default:              return L"NOT-RUN";
+  }
+}
+
+// Write Len bytes (Buf[0] = register) to the BM92T in one I2C packet.
+// Header 3 words + up to 4 payload words fit the 8-word TX FIFO.
+STATIC BOOLEAN R424WriteBlock (CONST UINT8 *Buf, UINTN Len, UINT32 *Status) {
+  volatile UINT32 *B = (volatile UINT32 *)BASE_ADDR;
+  UINTN I;
+  UINT32 W = 0;
+  if (Len < 2 || Len > 16 || !R288BeginI2c ()) return FALSE;
+  B[TX_FIFO] = HDR0; B[TX_FIFO] = (UINT32)(Len - 1);
+  B[TX_FIFO] = BM_ADDR << 1;
+  for (I = 0; I < Len; ++I) {
+    W |= (UINT32)Buf[I] << (8 * (I % 4));
+    if ((I % 4) == 3 || I == Len - 1) { B[TX_FIFO] = W; W = 0; }
+  }
+  if (!R288WaitI2c (Status)) return FALSE;
+  B[INT_STATUS_REG] = *Status;
+  return TRUE;
+}
+
+STATIC VOID R424WaitNotBusy (VOID) {
+  UINT16 S1 = 0;
+  UINT32 S = 0;
+  UINTN I;
+  for (I = 0; I < 40; ++I) {
+    if (R288Read16 (BM_STATUS1, &S1, &S) && (S1 & BM_CMD_BUSY) == 0) return;
+    gBS->Stall (5000);
+  }
+}
+
+// Read ALERT once to drop stale alert bits before a new command.
+STATIC VOID R424DrainAlerts (VOID) {
+  UINT16 A = 0;
+  UINT32 S = 0;
+  R288Read16 (BM_ALERT_STATUS, &A, &S);
+}
+
+STATIC BOOLEAN R424SendCmd (UINT16 Cmd) {
+  UINT32 S = 0;
+  R424WaitNotBusy ();
+  if (!R288Write16 (BM_COMMAND, Cmd, &S)) {
+    Print (L"R424 command %04x write FAIL I2C=%08x\r\n", Cmd, S);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+// Poll ALERT (reading clears it) until one of Want is seen. Returns the OR of
+// all alert bits seen, 0 on timeout.
+STATIC UINT16 R424WaitAlert (UINT16 Want, UINTN TimeoutMs) {
+  UINT16 A = 0, Seen = 0;
+  UINT32 S = 0;
+  UINTN T;
+  for (T = 0; T < TimeoutMs; T += 10) {
+    if (R288Read16 (BM_ALERT_STATUS, &A, &S)) {
+      Seen |= A;
+      if ((Seen & Want) != 0) return Seen;
+    }
+    gBS->Stall (10000);
+  }
+  Print (L"R424 timeout after %u ms waiting for alert %04x (seen %04x)\r\n",
+         (UINT32)TimeoutMs, Want, Seen);
+  return 0;
+}
+
+STATIC VOID R424PrintVdm (CONST CHAR16 *Tag, CONST UINT8 *Vdm) {
+  UINTN I, N = (UINTN)Vdm[0] + 1;
+  if (N > 29) N = 29;
+  Print (L"R424 %s VDM:", Tag);
+  for (I = 0; I < N; ++I) Print (L" %02x", Vdm[I]);
+  Print (L"\r\n");
+}
+
+// Send one VDM (Msg[0] = OUTGOING_VDM, Msg[1] = length), wait for the
+// partner's reply, accept it and read it into Reply[29].
+STATIC BOOLEAN R424VdmExchange (CONST CHAR16 *Tag, CONST UINT8 *Msg, UINTN Len, UINT8 *Reply) {
+  UINT32 S = 0;
+  UINT16 A;
+  ZeroMem (Reply, 29);
+  R424DrainAlerts ();
+  R424WaitNotBusy ();
+  if (!R424WriteBlock (Msg, Len, &S)) {
+    Print (L"R424 %s: OUTGOING_VDM write FAIL I2C=%08x\r\n", Tag, S);
+    return FALSE;
+  }
+  if (!R424SendCmd (BM_CMD_SEND_VDM)) return FALSE;
+  A = R424WaitAlert (BM_ALERT_VDM_RECEIVED, 1500);
+  if ((A & BM_ALERT_VDM_RECEIVED) == 0) {
+    Print (L"R424 %s: no reply VDM\r\n", Tag);
+    return FALSE;
+  }
+  if (!R424SendCmd (BM_CMD_ACCEPT_VDM)) return FALSE;
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 1000);
+  if ((A & BM_ALERT_CMD_DONE) == 0) Print (L"R424 %s: ACCEPT_VDM not done; reading anyway\r\n", Tag);
+  if (!R363ReadBlock (BM_ADDR, BM_INCOMING_VDM, Reply, 29, &S)) {
+    Print (L"R424 %s: INCOMING_VDM read FAIL I2C=%08x\r\n", Tag, S);
+    return FALSE;
+  }
+  R424PrintVdm (Tag, Reply);
+  return TRUE;
+}
+
+STATIC VOID R424ReadHpd (UINT32 *Pinmux, UINT32 *Cnf, BOOLEAN *Hpd) {
+  volatile UINT32 *Pm = (volatile UINT32 *)PINMUX_BASE;
+  volatile UINT32 *Gp = (volatile UINT32 *)(GPIO_BASE + GPIO_PCC_OFFSET);
+  *Pinmux = Pm[R424_PINMUX_DP_HPD / 4];
+  *Cnf = Gp[GPIO_CNF / 4];
+  *Hpd = (Gp[GPIO_IN / 4] & R424_HPD_BIT) != 0;
+}
+
+STATIC VOID R424PrintState (CONST CHAR16 *Tag) {
+  UINT16 S1 = 0, S2 = 0, Dp = 0;
+  UINT32 S = 0, Pm, Cnf;
+  BOOLEAN Hpd;
+  R288Read16 (BM_STATUS1, &S1, &S);
+  R288Read16 (BM_STATUS2, &S2, &S);
+  R288Read16 (BM_DP_STATUS, &Dp, &S);
+  R424ReadHpd (&Pm, &Cnf, &Hpd);
+  mR424DpStatus = Dp;
+  mR424Hpd = Hpd;
+  Print (L"R424 %s: S1=%04x (DR=%u lastcmd=%u) S2=%04x DP=%04x [DP_EN=%u INSERT=%u SIGNAL=%u PINCFG=%u] HPD(PCC1)=%u pinmux=%08x cnf=%02x\r\n",
+         Tag, S1, (S1 & BM_DR_MASK) >> BM_DR_SHIFT, (S1 >> 4) & 7U, S2, Dp,
+         (Dp & BM_DP_STATUS_DP_EN) != 0, (Dp & BM_DP_STATUS_INSERT) != 0,
+         (Dp & BM_DP_STATUS_SIGNAL_ON) != 0, (Dp & BM_DP_STATUS_PIN_CFG) != 0,
+         Hpd, Pm, Cnf & 0xFFU);
+}
+
+STATIC VOID R424Fail (R424_STEP Step) {
+  mR424Step = Step;
+  mR424Failed = TRUE;
+}
+
+// Generic partner: only read what it offers (SVIDs, DP modes).
+STATIC BOOLEAN R424ReadGenericModes (VOID) {
+  CONST UINT8 DiscSvid[6] = { BM_OUTGOING_VDM, 4, 0x02, 0x80, 0x00, 0xFF };
+  CONST UINT8 DiscMode[6] = { BM_OUTGOING_VDM, 4, 0x03, 0x80, 0x01, 0xFF };
+  UINT8 Vdm[29];
+  UINTN I;
+  if (!R424VdmExchange (L"DISCOVER-SVID", DiscSvid, sizeof (DiscSvid), Vdm)) return FALSE;
+  if (Vdm[1] == (0x40 | 0x02)) {
+    for (I = 0; I < ((UINTN)(Vdm[0] >= 4 ? Vdm[0] - 4 : 0) / 2) && I < 12; ++I)
+      Print (L"R424 SVID%u %04x\r\n", (UINT32)I, Vdm[5 + I * 2] | (Vdm[6 + I * 2] << 8));
+  }
+  if (!R424VdmExchange (L"DISCOVER-MODE-DP", DiscMode, sizeof (DiscMode), Vdm)) return FALSE;
+  if (Vdm[0] > 4 && Vdm[1] == (0x40 | 0x03) && Vdm[3] == 0x01 && Vdm[4] == 0xFF &&
+      (Vdm[5] & R424_VDO_DP_UFP_D) != 0 && (Vdm[5] & R424_VDO_DP_SUPPORT) != 0) {
+    Print (L"R424 partner supports DP Alt Mode (UFP_D): DPCap %02x%02x%02x%02x (%s, plug pins %02x, receptacle pins %02x)\r\n",
+           Vdm[8], Vdm[7], Vdm[6], Vdm[5], (Vdm[5] & R424_VDO_DP_RECEPTACLE) ? L"receptacle" : L"plug",
+           Vdm[6], Vdm[7]);
+    return TRUE;
+  }
+  Print (L"R424 partner reports no DP Alt Mode.\r\n");
+  return FALSE;
+}
+
+// R426: USB-C DisplayPort Alt Mode, stage 2a (DPAUX1 only; nothing is sent
+// on the main link). Runs right after a successful R424 stage 1 (DP_EN set).
+// Follows L4T drivers/video/tegra/dc/dpaux.c + dp.c (switch-l4t-kernel-nvidia):
+//   SOR power partition must already be on (it also holds DSI, so the panel
+//   keeps it on); CAR: sor_safe (CLK_ENB_Y bit 30) and dpaux1 (CLK_ENB_Y bit 15)
+//   on, dpaux1 reset pulse (RST_DEV_Y bit 15); DPAUX1 (0x54040000) prod
+//   HYBRID_PADCTL mask 0x37FE = 0x24C2 (L4T DT, DP mode), pad mode AUX, pad
+//   power up (HYBRID_SPARE = 0), HPD_CONFIG plug 250 / unplug 2000,
+//   HPD_IRQ_CONFIG 250. Then HPD from DPAUX_DP_AUXSTAT bit 28, DPCD 0x000-0x00F
+//   and 0x200-0x205 by native AUX reads, and EDID block 0 from I2C 0x50 by
+//   I2C-over-AUX (MOT write offset 0, MOT reads of 16, address-only I2C read
+//   as stop). Registers are word offsets x 4 as in dpaux_regs.h.
+#define R426_DPAUX1_BASE        0x54040000UL
+#define R426_CAR_CLK_OUT_ENB_Y  0x298U
+#define R426_CAR_CLK_ENB_Y_SET  0x29CU
+#define R426_CAR_RST_DEV_Y      0x2A4U
+#define R426_CAR_RST_DEV_Y_SET  0x2A8U
+#define R426_CAR_RST_DEV_Y_CLR  0x2ACU
+#define R426_Y_DPAUX1           (1U << 15)
+#define R426_Y_SOR_SAFE         (1U << 30)
+#define R426_PMC_PWRGATE_STATUS 0x38U
+#define R426_PG_SOR             (1U << 17)
+#define R426_AUXDATA_WR(i)      ((0x09U + 4U * (i)) * 4U)
+#define R426_AUXDATA_RD(i)      ((0x19U + 4U * (i)) * 4U)
+#define R426_AUXADDR            (0x29U * 4U)
+#define R426_AUXCTL             (0x2DU * 4U)
+#define R426_AUXSTAT            (0x31U * 4U)
+#define R426_HPD_CONFIG         (0x3DU * 4U)
+#define R426_HPD_IRQ_CONFIG     (0x41U * 4U)
+#define R426_HYBRID_PADCTL      (0x49U * 4U)
+#define R426_HYBRID_SPARE       (0x4DU * 4U)
+#define R426_CMD_I2CWR          (0U << 12)
+#define R426_CMD_I2CRD          (1U << 12)
+#define R426_CMD_MOTWR          (4U << 12)
+#define R426_CMD_MOTRD          (5U << 12)
+#define R426_CMD_AUXWR          (8U << 12)
+#define R426_CMD_AUXRD          (9U << 12)
+#define R426_CTL_ADDR_ONLY      (1U << 8)
+#define R426_CTL_TRANSACTREQ    (1U << 16)
+#define R426_STAT_HPD           (1U << 28)
+#define R426_STAT_ERRORS        (0xFU << 8)
+#define R426_STAT_REPLY_MASK    (0xFU << 16)
+#define R426_STAT_NACK          (1U << 16)
+#define R426_STAT_DEFER         (2U << 16)
+#define R426_STAT_I2CNACK       (4U << 16)
+#define R426_STAT_I2CDEFER      (8U << 16)
+
+STATIC CONST CHAR16 *mR426Step = NULL;
+STATIC BOOLEAN mR426Ok;
+STATIC BOOLEAN mR426Hpd;
+STATIC UINT8 mR426Dpcd[16];
+STATIC BOOLEAN mR426DpcdOk;
+STATIC BOOLEAN mR426EdidOk;
+STATIC CHAR16 mR426Mfg[4];
+STATIC CHAR16 mR426Name[14];
+STATIC UINT32 mR426W, mR426H, mR426Hz;
+
+STATIC UINT32 R426Rd (UINT32 Off) {
+  return ((volatile UINT32 *)R426_DPAUX1_BASE)[Off / 4];
+}
+
+STATIC VOID R426Wr (UINT32 Off, UINT32 Val) {
+  ((volatile UINT32 *)R426_DPAUX1_BASE)[Off / 4] = Val;
+}
+
+// One AUX transaction of up to 16 bytes (0 = address only), with the L4T
+// retry rules (3 for errors, 7 for defers). Returns TRUE on ACK.
+STATIC BOOLEAN R426AuxXfer (UINT32 Cmd, UINT32 Addr, UINT8 *Data, UINTN Size, BOOLEAN Write,
+                            UINT32 *Stat, UINTN *Got) {
+  UINT32 Ctl, St = 0, W[4];
+  UINTN T, Errs = 0, Defers = 0, I, N;
+  if (Size > 16) return FALSE;
+  if (Got != NULL) *Got = 0;
+  Ctl = R426Rd (R426_AUXCTL);
+  Ctl &= ~(0xFFU | R426_CTL_ADDR_ONLY | (0xFU << 12));
+  Ctl |= Cmd | (UINT32)(Size ? Size - 1 : 0) | (Size == 0 ? R426_CTL_ADDR_ONLY : 0);
+  R426Wr (R426_AUXCTL, Ctl);
+  R426Wr (R426_AUXADDR, Addr);
+  if (Write && Size != 0 && Data != NULL) {
+    ZeroMem (W, sizeof (W));
+    CopyMem (W, Data, Size);
+    for (I = 0; I < 4; ++I) R426Wr (R426_AUXDATA_WR (I), W[I]);
+  }
+  for (;;) {
+    St = R426Rd (R426_AUXSTAT);
+    if ((St & R426_STAT_HPD) == 0) { *Stat = St; return FALSE; }
+    R426Wr (R426_AUXCTL, R426Rd (R426_AUXCTL) | R426_CTL_TRANSACTREQ);
+    for (T = 0; T < 10000 && (R426Rd (R426_AUXCTL) & R426_CTL_TRANSACTREQ) != 0; ++T)
+      gBS->Stall (100);
+    St = R426Rd (R426_AUXSTAT);
+    *Stat = St;
+    if ((St & R426_STAT_ERRORS) != 0 ||
+        (Write && (St & (R426_STAT_NACK | R426_STAT_I2CNACK)) != 0)) {
+      if (Errs++ < 3) { R426Wr (R426_AUXSTAT, St); gBS->Stall (400); continue; }
+      return FALSE;
+    }
+    if ((St & (R426_STAT_DEFER | R426_STAT_I2CDEFER)) != 0) {
+      if (Defers++ < 7) { R426Wr (R426_AUXSTAT, St); gBS->Stall (400); continue; }
+      return FALSE;
+    }
+    if ((St & R426_STAT_REPLY_MASK) != 0) return FALSE;
+    if (!Write && Data != NULL && Size != 0) {
+      for (I = 0; I < 4; ++I) W[I] = R426Rd (R426_AUXDATA_RD (I));
+      N = St & 0xFFU;
+      if (N > Size) N = Size;
+      CopyMem (Data, W, N);
+      if (Got != NULL) *Got = N;
+    }
+    return TRUE;
+  }
+}
+
+STATIC VOID R426Hex (CONST CHAR16 *Tag, CONST UINT8 *B, UINTN N) {
+  UINTN I;
+  Print (L"R426 %s:", Tag);
+  for (I = 0; I < N; ++I) Print (L" %02x", B[I]);
+  Print (L"\r\n");
+}
+
+STATIC BOOLEAN R426ReadEdid (UINT8 *Edid) {
+  UINT8 Off = 0;
+  UINT32 St = 0;
+  UINTN Done = 0, Got, Tries = 0;
+  BOOLEAN Ok = TRUE;
+  if (!R426AuxXfer (R426_CMD_MOTWR, 0x50, &Off, 1, TRUE, &St, NULL)) {
+    Print (L"R426 EDID offset write (I2C 0x50) FAIL AUXSTAT=%08x\r\n", St);
+    R426AuxXfer (R426_CMD_I2CRD, 0x50, NULL, 0, FALSE, &St, NULL);
+    return FALSE;
+  }
+  while (Done < 128 && Tries++ < 32) {
+    if (!R426AuxXfer (R426_CMD_MOTRD, 0x50, Edid + Done, 16, FALSE, &St, &Got)) {
+      Print (L"R426 EDID read at %u FAIL AUXSTAT=%08x\r\n", (UINT32)Done, St);
+      Ok = FALSE;
+      break;
+    }
+    Done += Got;
+  }
+  R426AuxXfer (R426_CMD_I2CRD, 0x50, NULL, 0, FALSE, &St, NULL);   // stop
+  return Ok && Done >= 128;
+}
+
+STATIC VOID R426ParseEdid (CONST UINT8 *E) {
+  CONST UINT8 Hdr[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+  UINT8 Sum = 0;
+  UINTN I, K, J;
+  UINT16 M;
+  UINT32 Pclk, Ha, Hb, Va, Vb, Tot;
+  CONST UINT8 *D;
+  for (I = 0; I < 128; ++I) Sum = (UINT8)(Sum + E[I]);
+  if (CompareMem (E, Hdr, 8) != 0) {
+    Print (L"R426 EDID: bad header\r\n");
+    return;
+  }
+  M = (UINT16)((E[8] << 8) | E[9]);
+  mR426Mfg[0] = (CHAR16)(L'A' - 1 + ((M >> 10) & 0x1F));
+  mR426Mfg[1] = (CHAR16)(L'A' - 1 + ((M >> 5) & 0x1F));
+  mR426Mfg[2] = (CHAR16)(L'A' - 1 + (M & 0x1F));
+  mR426Mfg[3] = 0;
+  mR426Name[0] = 0;
+  for (K = 0; K < 4; ++K) {
+    D = E + 54 + 18 * K;
+    if (D[0] == 0 && D[1] == 0 && D[2] == 0 && D[3] == 0xFC) {
+      for (J = 0; J < 13 && D[5 + J] != 0x0A && D[5 + J] != 0; ++J)
+        mR426Name[J] = (CHAR16)((D[5 + J] >= 0x20 && D[5 + J] < 0x7F) ? D[5 + J] : '?');
+      mR426Name[J] = 0;
+    }
+  }
+  D = E + 54;
+  Pclk = (UINT32)(D[0] | (D[1] << 8));      // 10 kHz units
+  if (Pclk != 0) {
+    Ha = D[2] | ((UINT32)(D[4] >> 4) << 8);
+    Hb = D[3] | ((UINT32)(D[4] & 0xF) << 8);
+    Va = D[5] | ((UINT32)(D[7] >> 4) << 8);
+    Vb = D[6] | ((UINT32)(D[7] & 0xF) << 8);
+    mR426W = Ha;
+    mR426H = Va;
+    Tot = (Ha + Hb) * (Va + Vb);
+    mR426Hz = (Tot != 0) ? (Pclk * 10000U + Tot / 2) / Tot : 0;
+    Print (L"R426 EDID preferred: %ux%u @ %u Hz (pixel clock %u.%02u MHz)\r\n",
+           Ha, Va, mR426Hz, Pclk / 100, Pclk % 100);
+  }
+  Print (L"R426 EDID: maker %s product %04x name \"%s\" version %u.%u extensions %u checksum %s\r\n",
+         mR426Mfg, (UINT32)(E[10] | (E[11] << 8)), mR426Name, E[18], E[19], E[126],
+         Sum == 0 ? L"OK" : L"BAD");
+  mR426EdidOk = (Sum == 0);
+}
+
+STATIC VOID R426DpAuxStage2a (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINT32 Pg, ClkY, RstY, Pad, St = 0, Pm, Cnf;
+  UINT8 Edid[128], Sink[6];
+  UINTN I;
+  BOOLEAN PccHpd;
+
+  Print (L"\r\n---- R426 DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID) ----\r\n");
+  mR426Step = L"SOR-PARTITION";
+  Pg = Pmc[R426_PMC_PWRGATE_STATUS / 4];
+  ClkY = Car[R426_CAR_CLK_OUT_ENB_Y / 4];
+  RstY = Car[R426_CAR_RST_DEV_Y / 4];
+  Print (L"R426 PWRGATE_STATUS=%08x (SOR partition %s) CLK_ENB_Y=%08x RST_DEV_Y=%08x\r\n",
+         Pg, (Pg & R426_PG_SOR) ? L"on" : L"OFF", ClkY, RstY);
+  if ((Pg & R426_PG_SOR) == 0) {
+    Print (L"R426 SOR partition is off; DPAUX1 not touched.\r\n");
+    return;
+  }
+
+  mR426Step = L"DPAUX1-CLOCK";
+  Car[R426_CAR_CLK_ENB_Y_SET / 4] = R426_Y_SOR_SAFE | R426_Y_DPAUX1;
+  gBS->Stall (10);
+  Car[R426_CAR_RST_DEV_Y_SET / 4] = R426_Y_DPAUX1;
+  gBS->Stall (2000);
+  Car[R426_CAR_RST_DEV_Y_CLR / 4] = R426_Y_DPAUX1;
+  gBS->Stall (1000);
+  Print (L"R426 after clock/reset: CLK_ENB_Y=%08x RST_DEV_Y=%08x\r\n",
+         Car[R426_CAR_CLK_OUT_ENB_Y / 4], Car[R426_CAR_RST_DEV_Y / 4]);
+
+  mR426Step = L"DPAUX1-PAD";
+  Pad = R426Rd (R426_HYBRID_PADCTL);
+  Print (L"R426 DPAUX1 before: PADCTL=%08x SPARE=%08x AUXCTL=%08x AUXSTAT=%08x\r\n",
+         Pad, R426Rd (R426_HYBRID_SPARE), R426Rd (R426_AUXCTL), R426Rd (R426_AUXSTAT));
+  Pad = (Pad & ~0x37FEU) | 0x24C2U;              // L4T prod (DP)
+  Pad &= ~((1U << 15) | (1U << 14) | 1U);        // pad mode AUX (not I2C)
+  R426Wr (R426_HYBRID_PADCTL, Pad);
+  R426Wr (R426_HYBRID_SPARE, 0);                 // pad power up
+  R426Wr (R426_HPD_CONFIG, 250U | (2000U << 16));
+  R426Wr (R426_HPD_IRQ_CONFIG, 250U);
+  gBS->Stall (10000);
+
+  mR426Step = L"HPD";
+  for (I = 0; I < 30; ++I) {
+    St = R426Rd (R426_AUXSTAT);
+    if ((St & R426_STAT_HPD) != 0) break;
+    gBS->Stall (100000);
+  }
+  mR426Hpd = (St & R426_STAT_HPD) != 0;
+  R424ReadHpd (&Pm, &Cnf, &PccHpd);
+  Print (L"R426 DPAUX1 after: PADCTL=%08x SPARE=%08x AUXSTAT=%08x HPD(DPAUX)=%u after %u ms, HPD(PCC1 GPIO)=%u\r\n",
+         R426Rd (R426_HYBRID_PADCTL), R426Rd (R426_HYBRID_SPARE), St, mR426Hpd, (UINT32)(I * 100), PccHpd);
+  if (!mR426Hpd) {
+    Print (L"R426 no HPD on DPAUX1 (TV off or no DP from the dock?). Stopped.\r\n");
+    return;
+  }
+
+  mR426Step = L"DPCD";
+  if (!R426AuxXfer (R426_CMD_AUXRD, 0x000, mR426Dpcd, 16, FALSE, &St, &I) || I < 3) {
+    Print (L"R426 DPCD 0x000 read FAIL AUXSTAT=%08x got %u\r\n", St, (UINT32)I);
+    return;
+  }
+  mR426DpcdOk = TRUE;
+  R426Hex (L"DPCD 000-00F", mR426Dpcd, 16);
+  Print (L"R426 DPCD rev %u.%u, max link rate %02x (06=1.62 0A=2.7 14=5.4 Gbps/lane), max lanes %u%s, downstream port %s\r\n",
+         mR426Dpcd[0] >> 4, mR426Dpcd[0] & 0xF, mR426Dpcd[1], mR426Dpcd[2] & 0x1F,
+         (mR426Dpcd[2] & 0x80) ? L" (enhanced framing)" : L"",
+         (mR426Dpcd[5] & 1) ? L"present" : L"none");
+  if (R426AuxXfer (R426_CMD_AUXRD, 0x200, Sink, 6, FALSE, &St, &I))
+    R426Hex (L"DPCD 200-205 (sink count, IRQ, lane status)", Sink, I);
+
+  mR426Step = L"EDID";
+  ZeroMem (Edid, sizeof (Edid));
+  if (!R426ReadEdid (Edid)) return;
+  for (I = 0; I < 128; I += 32) {
+    Print (L"R426 EDID %02x:", (UINT32)I);
+    { UINTN J; for (J = 0; J < 32; ++J) Print (L"%02x", Edid[I + J]); }
+    Print (L"\r\n");
+  }
+  R426ParseEdid (Edid);
+  if (!mR426EdidOk) return;
+  mR426Step = L"DONE";
+  mR426Ok = TRUE;
+}
+
+STATIC VOID R426PrintSummary (VOID) {
+  if (mR426Step == NULL) return;
+  Print (L"R426 DPAUX: %s at %s; HPD=%u; DPCD rev %02x rate %02x lanes %u; EDID %s \"%s\" %ux%u@%u\r\n",
+         mR426Ok ? L"DONE" : L"STOPPED", mR426Step, mR426Hpd,
+         mR426DpcdOk ? mR426Dpcd[0] : 0, mR426DpcdOk ? mR426Dpcd[1] : 0,
+         mR426DpcdOk ? (mR426Dpcd[2] & 0x1F) : 0,
+         mR426EdidOk ? mR426Mfg : L"-", mR426Name, mR426W, mR426H, mR426Hz);
+}
+
+// R427: USB-C DisplayPort Alt Mode, stage 2b (SOR1 + DP link training, no
+// video yet). Runs after a successful R426 (HPD, DPCD and EDID read). Follows
+// L4T drivers/video/tegra/dc/{dp.c,sor.c,dp_lt.c} (tegra_dc_dp_enable ->
+// tegra_dp_prepare_pad -> tegra_dc_sor_enable_dp -> link training) and the
+// L4T running DT for sor1:
+//   PLLDP 270 MHz from the 38.4 MHz reference (Linux tegra210 table: M=1 N=28
+//   P=4 (hw 3), SDM din 0xF400 -> N 28.125; misc defaults MISC0 0x40000020,
+//   SS_CFG SDM on / SSC off, CTRL1 0xF400F0DA, CTRL2 0x2004F400);
+//   sor1_out mux (CLK_SOURCE_SOR1 [15:14]) = sor_safe, sor1 gate (CLK_ENB_X
+//   bit 23) on, sor1 reset pulse (RST_DEV_X bit 23);
+//   SOR_CLK_CNTRL: DP_CLK_SEL = DIFF_DPCLK, link speed; prod_c_dp (PLL0 mask
+//   0x0F000F10 = 0x01000310, PLL1 0x03F00100 = 0x00400100, PLL3 bit 13,
+//   0x70 = 0, DP_SPARE0 bit 0); termination calibration; DP pad power-up
+//   steps 1-5; lanes TXD_2 + TXD_1 (xbar-ctrl <2 1 0 3 4>, 2 lanes), lane
+//   count 2, lane sequencer power-up; DP_SPARE0 external panel + macro sorclk;
+//   DPCD SET_POWER D0, 8b/10b, link rate, lane count (+ enhanced framing);
+//   DP_CONFIG idle-before-attach, LINKCTL enhanced framing + port enable,
+//   XBAR_CTRL; sor1_out mux = sor1_pad_clkout; lane precharge; then the DP
+//   training: TPS1 with swing/pre-emphasis requests until CR_DONE on both
+//   lanes, then TPS2 until EQ, symbol lock and interlane align. Drive levels
+//   use the DT lt-data tables (pc2 level 0). HBR (2.7 Gbps) first, RBR next.
+#define R427_SOR1_BASE          0x54580000UL
+#define R427_CAR_CLK_OUT_ENB_X  0x280U
+#define R427_CAR_CLK_ENB_X_SET  0x284U
+#define R427_CAR_CLK_ENB_X_CLR  0x288U
+#define R427_CAR_RST_DEV_X      0x28CU
+#define R427_CAR_RST_DEV_X_SET  0x290U
+#define R427_CAR_RST_DEV_X_CLR  0x294U
+#define R427_X_SOR1             (1U << 23)
+#define R427_CAR_SRC_SOR1       0x410U
+#define R427_SOR1_OUT_MASK      (3U << 14)
+#define R427_SOR1_OUT_SAFE      (0U << 14)
+#define R427_SOR1_OUT_PAD       (1U << 14)
+#define R427_PLLDP_BASE         0x590U
+#define R427_PLLDP_MISC         0x594U
+#define R427_PLLDP_SS_CFG       0x598U
+#define R427_PLLDP_SS_CTRL1     0x59CU
+#define R427_PLLDP_SS_CTRL2     0x5A0U
+#define R427_PLL_ENABLE         (1U << 30)
+#define R427_PLL_LOCK           (1U << 27)
+#define R427_PLL_LOCK_OVERRIDE  (1U << 24)
+#define R427_PLL_IDDQ           (1U << 18)
+// SOR word offsets
+#define R427_CLK_CNTRL          0x13U
+#define R427_PWR                0x15U
+#define R427_PLL0               0x17U
+#define R427_PLL1               0x18U
+#define R427_PLL2               0x19U
+#define R427_PLL3               0x1AU
+#define R427_PROD_1C            0x1CU
+#define R427_LANE_SEQ_CTL       0x21U
+#define R427_XBAR_CTRL          0x4AU
+#define R427_XBAR_POL           0x4BU
+#define R427_LINKCTL0           0x4CU
+#define R427_DC0                0x4EU
+#define R427_PR0                0x52U
+#define R427_DP_CONFIG0         0x58U
+#define R427_PADCTL0            0x5CU
+#define R427_DP_SPARE0          0x60U
+#define R427_DP_TPG             0x6DU
+
+STATIC CONST CHAR16 *mR427Step = NULL;
+STATIC BOOLEAN mR427Ok;
+STATIC UINT8 mR427Bw, mR427Status[6];
+STATIC UINT32 mR427Tries;
+
+// DT lt-data, pc2 level 0, index = (vs,pe) with vs+pe <= 3:
+// 0..3 = vs0 pe0..3, 4..6 = vs1 pe0..2, 7..8 = vs2 pe0..1, 9 = vs3 pe0.
+// Per logical lane (pc2_l0 .. pc2_l3 are per pc2 level, all lanes share one row).
+STATIC CONST UINT8 mR427Vs[10]  = { 0x13, 0x19, 0x1E, 0x28, 0x1E, 0x25, 0x2D, 0x28, 0x32, 0x3C };
+STATIC CONST UINT8 mR427Pe[10]  = { 0x00, 0x08, 0x12, 0x24, 0x01, 0x0E, 0x1D, 0x01, 0x13, 0x00 };
+STATIC CONST UINT8 mR427TxPu[10] = { 0x20, 0x30, 0x40, 0x60, 0x30, 0x40, 0x60, 0x40, 0x60, 0x60 };
+// xbar-ctrl <2 1 0 3 4>: logical lane 0 -> pad lane 2, lane 1 -> pad lane 1.
+// Per pad lane: shift in DC/PR (pad 2 -> 0, pad 1 -> 8) and PD_TXD bit (pad 2 -> bit 0, pad 1 -> bit 1).
+STATIC CONST UINT8 mR427LaneShift[2] = { 0, 8 };
+
+STATIC UINT32 R427Rd (UINT32 W) {
+  return ((volatile UINT32 *)R427_SOR1_BASE)[W];
+}
+
+STATIC VOID R427Wr (UINT32 W, UINT32 V) {
+  ((volatile UINT32 *)R427_SOR1_BASE)[W] = V;
+}
+
+STATIC VOID R427Field (UINT32 W, UINT32 Mask, UINT32 V) {
+  R427Wr (W, (R427Rd (W) & ~Mask) | (V & Mask));
+}
+
+STATIC BOOLEAN R427Poll (UINT32 W, UINT32 Mask, UINT32 Want, UINTN TimeoutUs) {
+  UINTN T;
+  for (T = 0; T < TimeoutUs; T += 10) {
+    if ((R427Rd (W) & Mask) == Want) return TRUE;
+    gBS->Stall (10);
+  }
+  return (R427Rd (W) & Mask) == Want;
+}
+
+STATIC BOOLEAN R427DpcdW (UINT32 Addr, CONST UINT8 *Data, UINTN N) {
+  UINT32 St = 0;
+  UINT8 Buf[16];
+  CopyMem (Buf, Data, N);
+  if (R426AuxXfer (R426_CMD_AUXWR, Addr, Buf, N, TRUE, &St, NULL)) return TRUE;
+  Print (L"R427 DPCD write %03x FAIL AUXSTAT=%08x\r\n", Addr, St);
+  return FALSE;
+}
+
+STATIC BOOLEAN R427DpcdW1 (UINT32 Addr, UINT8 V) {
+  return R427DpcdW (Addr, &V, 1);
+}
+
+STATIC BOOLEAN R427DpcdR (UINT32 Addr, UINT8 *Data, UINTN N) {
+  UINT32 St = 0;
+  UINTN Got = 0;
+  if (R426AuxXfer (R426_CMD_AUXRD, Addr, Data, N, FALSE, &St, &Got) && Got >= N) return TRUE;
+  Print (L"R427 DPCD read %03x FAIL AUXSTAT=%08x got %u\r\n", Addr, St, (UINT32)Got);
+  return FALSE;
+}
+
+STATIC VOID R427Dump (CONST CHAR16 *Tag) {
+  Print (L"R427 %s: PWR=%08x CLK=%08x PLL0=%08x PLL1=%08x PLL2=%08x PLL3=%08x SEQ=%08x LINK=%08x PAD=%08x SPARE=%08x\r\n",
+         Tag, R427Rd (R427_PWR), R427Rd (R427_CLK_CNTRL), R427Rd (R427_PLL0), R427Rd (R427_PLL1),
+         R427Rd (R427_PLL2), R427Rd (R427_PLL3), R427Rd (R427_LANE_SEQ_CTL), R427Rd (R427_LINKCTL0),
+         R427Rd (R427_PADCTL0), R427Rd (R427_DP_SPARE0));
+}
+
+STATIC VOID R427SorOut (UINT32 Sel) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  // HW bug 1425607 (L4T): gate the clock while switching the mux.
+  Car[R427_CAR_CLK_ENB_X_CLR / 4] = R427_X_SOR1;
+  gBS->Stall (5);
+  Car[R427_CAR_SRC_SOR1 / 4] = (Car[R427_CAR_SRC_SOR1 / 4] & ~R427_SOR1_OUT_MASK) | Sel;
+  gBS->Stall (5);
+  Car[R427_CAR_CLK_ENB_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (20);
+}
+
+STATIC BOOLEAN R427PllDp (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  UINT32 B = Car[R427_PLLDP_BASE / 4];
+  UINTN T;
+  Print (L"R427 PLLDP before: BASE=%08x MISC=%08x SS_CFG=%08x\r\n", B, Car[R427_PLLDP_MISC / 4],
+         Car[R427_PLLDP_SS_CFG / 4]);
+  // R428: R427H on hardware found PLLDP already on (BASE 0x58103B02: M=2
+  // N=59 P=3 -> 377.6 MHz, left by an earlier loader) and kept it; CR then
+  // passed but EQ never got symbol lock. Keep it only when it is exactly
+  // the 270 MHz setting below, otherwise switch it off and program it again.
+  {
+    UINT32 M = B & 0xFFU, N = (B >> 8) & 0xFFU, Ph = (B >> 19) & 0x1FU;
+    CONST UINT8 Pdiv[12] = { 1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16 };
+    UINT32 Pd = (Ph < 12) ? Pdiv[Ph] : 0;
+    if (M != 0 && Pd != 0)
+      Print (L"R428 PLLDP found M=%u N=%u P=%u -> about %u MHz (SDM %s)\r\n", M, N, Pd,
+             (38400U / M * N / Pd) / 1000U, (Car[R427_PLLDP_SS_CFG / 4] & (1U << 31)) ? L"on" : L"off");
+    if ((B & R427_PLL_ENABLE) != 0 && (B & R427_PLL_LOCK) != 0 && M == 1 && N == 28 && Ph == 3 &&
+        (Car[R427_PLLDP_SS_CFG / 4] & (1U << 31)) != 0) {
+      Print (L"R427 PLLDP already at 270 MHz and locked; kept.\r\n");
+      return TRUE;
+    }
+    if ((B & R427_PLL_ENABLE) != 0) {
+      Print (L"R428 PLLDP is on with another setting: switching it off and programming 270 MHz.\r\n");
+      Car[R427_PLLDP_BASE / 4] = B & ~R427_PLL_ENABLE;
+      gBS->Stall (10);
+      B = Car[R427_PLLDP_BASE / 4];
+    }
+  }
+  Car[R427_PLLDP_BASE / 4] = (B | R427_PLL_IDDQ) & ~(R427_PLL_LOCK_OVERRIDE | R427_PLL_ENABLE);
+  Car[R427_PLLDP_MISC / 4] = 0x40000020U;
+  Car[R427_PLLDP_SS_CFG / 4] = 0x80000000U;        // SDM on, SSC off
+  Car[R427_PLLDP_SS_CTRL1 / 4] = 0xF400F0DAU;
+  Car[R427_PLLDP_SS_CTRL2 / 4] = 0x2004F400U;      // SDM din 0xF400
+  gBS->Stall (1);
+  B = R427_PLL_IDDQ | (3U << 19) | (28U << 8) | 1U; // P=4 (hw 3), N=28, M=1, ref sel 0
+  Car[R427_PLLDP_BASE / 4] = B;
+  gBS->Stall (2);
+  B &= ~R427_PLL_IDDQ;
+  Car[R427_PLLDP_BASE / 4] = B;
+  gBS->Stall (5);
+  Car[R427_PLLDP_BASE / 4] = B | R427_PLL_ENABLE;
+  for (T = 0; T < 1000 && (Car[R427_PLLDP_BASE / 4] & R427_PLL_LOCK) == 0; ++T) gBS->Stall (10);
+  B = Car[R427_PLLDP_BASE / 4];
+  Print (L"R427 PLLDP after: BASE=%08x (enable=%u lock=%u after %u us) MISC=%08x SS_CFG=%08x\r\n",
+         B, (B & R427_PLL_ENABLE) != 0, (B & R427_PLL_LOCK) != 0, (UINT32)(T * 10),
+         Car[R427_PLLDP_MISC / 4], Car[R427_PLLDP_SS_CFG / 4]);
+  return (B & R427_PLL_LOCK) != 0;
+}
+
+STATIC VOID R427TermCal (VOID) {
+  UINT32 Adj = 8, Try = 8;
+  R427Field (R427_PLL2, 1U << 22, 0);              // bandgap on
+  R427Field (R427_PLL1, 1U << 8, 1U << 8);         // TMDS_TERM enable
+  gBS->Stall (50);
+  R427Field (R427_PADCTL0, 1U << 23, 0);           // PAD_CAL power up
+  gBS->Stall (20);
+  R427Field (R427_PLL1, 0xFU << 9, Adj << 9);
+  while (Try != 0) {
+    gBS->Stall (150);
+    if ((R427Rd (R427_PLL1) & (1U << 15)) != 0) Adj -= Try;
+    Try >>= 1;
+    Adj += Try;
+    R427Field (R427_PLL1, 0xFU << 9, Adj << 9);
+  }
+  R427Field (R427_PADCTL0, 1U << 23, 1U << 23);    // PAD_CAL power down
+  gBS->Stall (20);
+  R427Field (R427_PLL2, 1U << 22, 1U << 22);       // bandgap off
+  R427Field (R427_PLL1, 1U << 8, 0);
+  gBS->Stall (50);
+  Print (L"R427 termination calibration: TERMADJ=%u PLL1=%08x\r\n", (R427Rd (R427_PLL1) >> 9) & 0xF, R427Rd (R427_PLL1));
+}
+
+STATIC VOID R427PadPowerUp (VOID) {
+  R427Field (R427_PLL2, 1U << 18, 0);              // AUX2 override powerdown
+  R427Field (R427_PLL2, 1U << 17, 1U << 17);       // AUX1 PLLCAPPD override
+  // step 1: PDPORT, PDBG, PLLCAPD, PDPLL, PLLVCOPD, PDCAL
+  R427Field (R427_PLL2, (1U << 23) | (1U << 22) | (1U << 24), (1U << 23) | (1U << 22) | (1U << 24));
+  R427Field (R427_PLL0, 1U | (1U << 2), 1U | (1U << 2));
+  R427Field (R427_PADCTL0, 1U << 23, 1U << 23);
+  gBS->Stall (10);                                 // step 2 (no DPD pinctrl for sor1)
+  R427Field (R427_PLL2, 1U << 22, 0);              // step 3: bandgap
+  gBS->Stall (150);
+  R427Field (R427_PLL0, 1U | (1U << 2), 0);        // step 4: PLL on, VCO
+  R427Field (R427_PLL2, 1U << 24, 0);
+  gBS->Stall (1000);
+  R427Field (R427_PLL2, 1U << 23, 0);              // step 5: port
+  R427Field (R427_PLL1, 1U << 8, 1U << 8);         // TERM_ENABLE back on
+  gBS->Stall (20);
+}
+
+STATIC VOID R427SetTpg (UINT32 Tp) {
+  // per logical lane byte: pattern [3:0], scrambler [5:4], channel coding [6]
+  UINT32 L = (Tp == 0) ? (0x00U | (1U << 4) | (1U << 6)) : (Tp | (1U << 6));
+  R427Wr (R427_DP_TPG, L | (L << 8));
+  R427DpcdW1 (0x102, (UINT8)(Tp == 0 ? 0x00 : (0x20 | Tp)));
+}
+
+STATIC UINTN R427Idx (UINT8 Vs, UINT8 Pe) {
+  CONST UINT8 Base[4] = { 0, 4, 7, 9 };
+  if (Vs > 3) Vs = 3;
+  if (Pe > 3 - Vs) Pe = (UINT8)(3 - Vs);
+  return Base[Vs] + Pe;
+}
+
+STATIC VOID R427ApplyLevels (UINT8 *Vs, UINT8 *Pe) {
+  UINTN I, Idx;
+  UINT32 TxPu = 0;
+  UINT8 Set[2];
+  for (I = 0; I < 2; ++I) {
+    if (Vs[I] > 3) Vs[I] = 3;
+    if (Pe[I] > 3 - Vs[I]) Pe[I] = (UINT8)(3 - Vs[I]);
+    Idx = R427Idx (Vs[I], Pe[I]);
+    R427Field (R427_PR0, 0xFFU << mR427LaneShift[I], (UINT32)mR427Pe[Idx] << mR427LaneShift[I]);
+    R427Field (R427_DC0, 0xFFU << mR427LaneShift[I], (UINT32)mR427Vs[Idx] << mR427LaneShift[I]);
+    if (mR427TxPu[Idx] > TxPu) TxPu = mR427TxPu[Idx];
+    Set[I] = (UINT8)(Vs[I] | ((Vs[I] >= 3 - Pe[I]) ? 0x04 : 0) | (Pe[I] << 3) | ((Pe[I] >= 3 - Vs[I]) ? 0x20 : 0));
+  }
+  R427Field (R427_PADCTL0, (0xFFU << 8) | (1U << 22), (TxPu << 8) | (1U << 22));
+  gBS->Stall (20);
+  R427DpcdW (0x103, Set, 2);
+}
+
+STATIC VOID R427ReadAdjust (CONST UINT8 *S, UINT8 *Vs, UINT8 *Pe) {
+  Vs[0] = S[4] & 3;
+  Pe[0] = (S[4] >> 2) & 3;
+  Vs[1] = (S[4] >> 4) & 3;
+  Pe[1] = (S[4] >> 6) & 3;
+}
+
+STATIC BOOLEAN R427Train (UINT8 Bw) {
+  UINT8 Vs[2] = { 0, 0 }, Pe[2] = { 0, 0 }, S[6], Interval;
+  UINT8 OldVs0 = 0xFF, OldVs1 = 0xFF;
+  UINTN Try, Same = 0;
+  BOOLEAN Cr = FALSE, Eq = FALSE;
+  Interval = mR426Dpcd[0x0E] & 0x7F;
+
+  mR427Step = L"CLOCK-RECOVERY";
+  R427SetTpg (1);
+  for (Try = 0; Try < 10; ++Try) {
+    R427ApplyLevels (Vs, Pe);
+    gBS->Stall (Interval ? (UINTN)Interval * 4000 : 200);
+    if (!R427DpcdR (0x202, S, 6)) return FALSE;
+    CopyMem (mR427Status, S, 6);
+    Print (L"R427 CR %u: vs %u/%u pe %u/%u -> status %02x %02x %02x %02x adj %02x %02x\r\n",
+           (UINT32)Try, Vs[0], Vs[1], Pe[0], Pe[1], S[0], S[1], S[2], S[3], S[4], S[5]);
+    ++mR427Tries;
+    if ((S[0] & 0x11) == 0x11) { Cr = TRUE; break; }
+    if (Vs[0] == 3 && Vs[1] == 3) break;
+    if (Vs[0] == OldVs0 && Vs[1] == OldVs1) { if (++Same >= 5) break; } else Same = 0;
+    OldVs0 = Vs[0];
+    OldVs1 = Vs[1];
+    R427ReadAdjust (S, Vs, Pe);
+  }
+  if (!Cr) {
+    Print (L"R427 clock recovery FAILED at %u.%u Gbps\r\n", (UINT32)(Bw * 27 / 100), (UINT32)((Bw * 27 / 10) % 10));
+    R427SetTpg (0);
+    return FALSE;
+  }
+  Print (L"R427 clock recovery OK on both lanes.\r\n");
+
+  mR427Step = L"CHANNEL-EQUALIZATION";
+  R427SetTpg (2);
+  for (Try = 0; Try < 6; ++Try) {
+    R427ApplyLevels (Vs, Pe);
+    gBS->Stall (Interval ? (UINTN)Interval * 4000 : 500);
+    if (!R427DpcdR (0x202, S, 6)) return FALSE;
+    CopyMem (mR427Status, S, 6);
+    Print (L"R427 EQ %u: vs %u/%u pe %u/%u -> status %02x %02x %02x %02x adj %02x %02x\r\n",
+           (UINT32)Try, Vs[0], Vs[1], Pe[0], Pe[1], S[0], S[1], S[2], S[3], S[4], S[5]);
+    ++mR427Tries;
+    if ((S[0] & 0x11) != 0x11) { Print (L"R427 clock recovery lost during EQ.\r\n"); break; }
+    if ((S[0] & 0x77) == 0x77 && (S[2] & 0x01) != 0) { Eq = TRUE; break; }
+    R427ReadAdjust (S, Vs, Pe);
+  }
+  R427SetTpg (0);
+  if (!Eq) {
+    Print (L"R427 channel equalization FAILED\r\n");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+STATIC VOID R427SetLinkRate (UINT8 Bw) {
+  R427SorOut (R427_SOR1_OUT_SAFE);
+  R427Field (R427_CLK_CNTRL, 0x7FU, 3U | ((UINT32)Bw << 2));  // DIFF_DPCLK + link speed
+  gBS->Stall (300);
+}
+
+// R439: SOR1 pad power. L4T DT (dc1 node): vdd-dp-pad-supply = MAX77620 LDO8
+// "vdd-hdmi-dp" 1.05 V, FPS source none, i.e. OFF after a full power-off.
+// R428H-R434H only worked because an earlier boot had left LDO8 on (the PMIC
+// keeps it through a reboot); after a real power-off R437H/R438H/R434H saw
+// termination calibration run to 15 and then an SError once SOR1 switched to
+// the pad clock. Also take the HDMI pads out of deep power-down (PMC
+// IO_DPD_REQ bit 28, L4T pinctrl "hdmi-dpd-disable").
+#define R439_LDO8_CFG        0x33
+#define R439_FPS_LDO8        0x4E
+#define R439_PMC_IO_DPD_REQ  0x1B8U
+#define R439_PMC_IO_DPD_STAT 0x1BCU
+#define R439_DPD_HDMI        (1U << 28)
+STATIC UINT8 R404Ldo (UINT8 CfgReg, UINT8 FpsReg);
+
+STATIC VOID R439PadPower (VOID) {
+  volatile UINT32 *Pmc = (volatile UINT32 *)0x7000E400UL;
+  UINT8 Before = 0, After;
+  UINT32 Dpd0 = Pmc[R439_PMC_IO_DPD_STAT / 4];
+  if (i2c_recv_buf_small (&Before, 1, I2C_5, MAX77620_ADDR, R439_LDO8_CFG) != 1) Before = 0xEE;
+  After = R404Ldo (R439_LDO8_CFG, R439_FPS_LDO8);
+  Pmc[R439_PMC_IO_DPD_REQ / 4] = (1U << 30) | R439_DPD_HDMI;      // code 1 = DPD off
+  gBS->Stall (100);
+  Print (L"R439 SOR1 pad power: vdd-hdmi-dp (MAX77620 LDO8) %02x -> %02x (%s); HDMI pad DPD %u -> %u\r\n",
+         Before, After, (After >> 6) == 3 ? L"ON 1.05 V" : L"NOT on", (Dpd0 & R439_DPD_HDMI) != 0,
+         (Pmc[R439_PMC_IO_DPD_STAT / 4] & R439_DPD_HDMI) != 0);
+}
+
+STATIC VOID R427DpLinkStage2b (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  CONST UINT8 Rates[2] = { 0x0A, 0x06 };
+  UINTN R;
+  UINT32 V;
+  UINT8 One;
+
+  Print (L"\r\n---- R427 DP Alt Mode stage 2b (SOR1 + link training, no video) ----\r\n");
+  R439PadPower ();
+  mR427Step = L"PLLDP";
+  if (!R427PllDp ()) { Print (L"R427 PLLDP did not lock. Stopped.\r\n"); return; }
+
+  mR427Step = L"SOR1-CLOCK";
+  Print (L"R427 CAR before: SRC_SOR1=%08x CLK_ENB_X=%08x RST_DEV_X=%08x\r\n",
+         Car[R427_CAR_SRC_SOR1 / 4], Car[R427_CAR_CLK_OUT_ENB_X / 4], Car[R427_CAR_RST_DEV_X / 4]);
+  Car[R427_CAR_SRC_SOR1 / 4] = (Car[R427_CAR_SRC_SOR1 / 4] & ~R427_SOR1_OUT_MASK) | R427_SOR1_OUT_SAFE;
+  Car[R427_CAR_CLK_ENB_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (10);
+  Car[R427_CAR_RST_DEV_X_SET / 4] = R427_X_SOR1;
+  gBS->Stall (2000);
+  Car[R427_CAR_RST_DEV_X_CLR / 4] = R427_X_SOR1;
+  gBS->Stall (1000);
+  Print (L"R427 CAR after: SRC_SOR1=%08x CLK_ENB_X=%08x RST_DEV_X=%08x\r\n",
+         Car[R427_CAR_SRC_SOR1 / 4], Car[R427_CAR_CLK_OUT_ENB_X / 4], Car[R427_CAR_RST_DEV_X / 4]);
+  R427Dump (L"SOR1 reset state");
+
+  mR427Step = L"SOR1-PAD";
+  R427Field (R427_CLK_CNTRL, 0x7FU, 3U | ((UINT32)Rates[0] << 2));
+  gBS->Stall (300);
+  R427Field (R427_PLL0, 0x0F000F10U, 0x01000310U);   // prod_c_dp
+  R427Field (R427_PLL1, 0x03F00100U, 0x00400100U);
+  R427Field (R427_PLL3, 0x00002000U, 0x00002000U);
+  R427Wr (R427_PROD_1C, 0);
+  R427Field (R427_DP_SPARE0, 1U, 1U);
+  R427TermCal ();
+  // R440: TERMADJ at the top end means the pads have no power (LDO8 off):
+  // switching SOR1 to the pad clock would then take an SError. Stop here.
+  if (((R427Rd (R427_PLL1) >> 9) & 0xF) == 15) {
+    mR427Step = L"PAD-POWER";
+    Print (L"R440 termination calibration ran to 15: SOR1 pads have no power (vdd-hdmi-dp). Stopped before the pad clock.\r\n");
+    return;
+  }
+  R427PadPowerUp ();
+  R427Field (R427_PADCTL0, 0xFU, 0x3U);               // pad lanes 2 and 1 powered (TXD_2, TXD_1)
+  R427Field (R427_LINKCTL0, 0x1FU << 16, 3U << 16);   // lane count 2
+  if (!R427Poll (R427_LANE_SEQ_CTL, 1U << 28, 0, 100000))
+    Print (L"R427 lane sequencer busy before power-up\r\n");
+  R427Wr (R427_LANE_SEQ_CTL, (1U << 31) | (1U << 20) | (15U << 12));
+  if (!R427Poll (R427_LANE_SEQ_CTL, 1U << 31, 0, 100000)) {
+    R427Dump (L"lane sequencer timeout");
+    Print (L"R427 lane power-up did not finish. Stopped.\r\n");
+    return;
+  }
+  V = R427Rd (R427_DP_SPARE0);
+  R427Wr (R427_DP_SPARE0, (V & ~(1U << 1)) | (1U << 2)); // external panel, macro sorclk
+  R427Dump (L"pads up");
+
+  mR427Step = L"DPCD-SETUP";
+  // R438: one line per step (R437H stopped right after "pads up")
+  Print (L"R438 a: AUXCTL=%08x AUXSTAT=%08x, DPCD 600 <- 01\r\n", R426Rd (R426_AUXCTL), R426Rd (R426_AUXSTAT));
+  if (!R427DpcdW1 (0x600, 0x01)) return;               // D0
+  gBS->Stall (1000);
+  Print (L"R438 b: DPCD 108/107\r\n");
+  R427DpcdW1 (0x108, 0x01);                             // 8b/10b
+  R427DpcdW1 (0x107, 0x00);                             // no downspread
+  Print (L"R438 c: DP_CONFIG0 / LINKCTL0\r\n");
+  R427Field (R427_DP_CONFIG0, 1U << 28, 1U << 28);      // idle before attach
+  R427Field (R427_LINKCTL0, (1U << 14) | 1U, ((mR426Dpcd[2] & 0x80) ? (1U << 14) : 0) | 1U);
+  Print (L"R438 d: XBAR\r\n");
+  V = (2U << 2) | (1U << 5) | (0U << 8) | (3U << 11) | (4U << 14);
+  R427Field (R427_XBAR_CTRL, 0x3U | (0x7FFFU << 2), V);
+  R427Wr (R427_XBAR_POL, 0);
+  Print (L"R438 e: setup done\r\n");
+
+  for (R = 0; R < 2; ++R) {
+    mR427Bw = Rates[R];
+    mR427Step = L"LINK-RATE";
+    if (R != 0) R427SetLinkRate (mR427Bw);
+    R427DpcdW1 (0x100, mR427Bw);
+    One = (UINT8)(2 | ((mR426Dpcd[2] & 0x80) ? 0x80 : 0));
+    R427DpcdW1 (0x101, One);
+    R427SorOut (R427_SOR1_OUT_PAD);
+    R427Field (R427_PADCTL0, 0xFU << 4, 0x3U << 4);   // precharge
+    gBS->Stall (50);
+    R427Field (R427_PADCTL0, 0xFU << 4, 0);
+    Print (L"R427 training at %s Gbps x 2 lanes (SRC_SOR1=%08x)\r\n",
+           mR427Bw == 0x0A ? L"2.7" : L"1.62", Car[R427_CAR_SRC_SOR1 / 4]);
+    if (R427Train (mR427Bw)) {
+      mR427Step = L"DONE";
+      mR427Ok = TRUE;
+      Print (L"R427 LINK TRAINED: %s Gbps x 2 lanes. Lane status %02x %02x align %02x.\r\n",
+             mR427Bw == 0x0A ? L"2.7" : L"1.62", mR427Status[0], mR427Status[1], mR427Status[2]);
+      R427Dump (L"trained");
+      return;
+    }
+  }
+  R427Dump (L"training failed");
+}
+
+STATIC VOID R427PrintSummary (VOID) {
+  if (mR427Step == NULL) return;
+  Print (L"R427 DP-LINK: %s at %s; rate %02x x2; status %02x %02x %02x; steps %u\r\n",
+         mR427Ok ? L"DONE" : L"STOPPED", mR427Step, mR427Bw, mR427Status[0], mR427Status[1],
+         mR427Status[2], mR427Tries);
+}
+
+//
+// R429: USB-C DisplayPort Alt Mode, stage 3 (first picture on the TV).
+// Runs only after R427/R428 trained the link. Powers DC-B (DISB partition,
+// disp2 clock from PLLP / shift divider 5.5 = 74.18 MHz), sets a CEA
+// 1280x720@60 raster with no windows (the DC outputs only its background
+// colour, so no framebuffer or memory client is needed), programs the SOR1
+// DP transfer unit and head-1 raster, then attaches SOR1 to DC-B (coreboot
+// tegra210 sor.c tegra_dc_sor_attach order). The TV should then show red,
+// green, blue and finally stay white.
+//
+#define R429_DC_BASE            0x54240000UL
+#define R429_CAR_RST_DEV_L      0x004U
+#define R429_CAR_CLK_OUT_ENB_L  0x010U
+#define R429_CAR_SRC_DISP1      0x138U
+#define R429_CAR_SRC_DISP2      0x13CU   // R430: was 0x140 in R429 (wrong register)
+#define R429_CAR_RST_DEV_L_SET  0x300U
+#define R429_CAR_RST_DEV_L_CLR  0x304U
+#define R429_CAR_CLK_ENB_L_SET  0x320U
+#define R429_L_DISP2            (1U << 26)
+#define R429_PMC_PWRGATE_TOGGLE 0x30U
+#define R429_PMC_REMOVE_CLAMP   0x34U
+#define R429_PMC_PWRGATE_STATUS 0x38U
+#define R429_PG_DISB            19U
+// DC word registers
+#define R429_DC_DISP_CMD        0x032U
+#define R429_DC_POWER_CTRL      0x036U
+#define R429_DC_INT_STATUS      0x037U
+#define R429_DC_INT_MASK        0x038U
+#define R429_DC_INT_ENABLE      0x039U
+#define R429_DC_STATE_ACCESS    0x040U
+#define R429_DC_STATE_CTRL      0x041U
+#define R429_DC_WIN_HEADER      0x042U
+#define R429_DC_SIGNAL_OPT0     0x400U
+#define R429_DC_WIN_OPTIONS     0x402U
+#define R429_DC_TIMING_OPT      0x405U
+#define R429_DC_REF_TO_SYNC     0x406U
+#define R429_DC_SYNC_WIDTH      0x407U
+#define R429_DC_BACK_PORCH      0x408U
+#define R429_DC_ACTIVE          0x409U
+#define R429_DC_FRONT_PORCH     0x40AU
+#define R429_DC_CLOCK_CTRL      0x42EU
+#define R429_DC_IFACE_CTRL      0x42FU
+#define R429_DC_COLOR_CTRL      0x430U
+#define R429_DC_BG_COLOR        0x4E4U
+#define R429_DC_WIN_OPT         0x700U
+#define R429_DC_SOR1_ENABLE     (1U << 26)
+#define R429_DC_C_DISPLAY       (1U << 5)
+// SOR word registers (head 1)
+#define R429_SOR_SUPER_STATE0   0x01U
+#define R429_SOR_SUPER_STATE1   0x02U
+#define R429_SOR_STATE0         0x03U
+#define R429_SOR_STATE1         0x04U
+#define R429_SOR_HEAD_STATE1    0x08U
+#define R429_SOR_HEAD_STATE2    0x0AU
+#define R429_SOR_HEAD_STATE3    0x0CU
+#define R429_SOR_HEAD_STATE4    0x0EU
+#define R429_SOR_HEAD_STATE5    0x10U
+#define R429_SOR_TEST           0x16U
+#define R429_SOR_CSTM           0x1BU
+#define R429_SOR_HBLANK_SYM     0x63U
+#define R429_SOR_VBLANK_SYM     0x64U
+// CEA-861 mode 4: 1280x720@60, +hsync +vsync
+#define R429_HACT  1280U
+#define R429_HFP   110U
+#define R429_HSYNC 40U
+#define R429_HBP   220U
+#define R429_VACT  720U
+#define R429_VFP   5U
+#define R429_VSYNC 5U
+#define R429_VBP   20U
+#define R429_PCLK  74250000U   // R433: PLLD2 594/8 = 74.25 MHz, shift divider 1
+
+STATIC CONST CHAR16 *mR429Step = NULL;
+STATIC BOOLEAN mR429Ok;
+STATIC UINT32 mR429Test, mR429Tu, mR429Act, mR429Frac, mR429Wm;
+
+STATIC UINT32 R429DcRd (UINT32 W) {
+  return ((volatile UINT32 *)R429_DC_BASE)[W];
+}
+
+STATIC VOID R429DcWr (UINT32 W, UINT32 V) {
+  ((volatile UINT32 *)R429_DC_BASE)[W] = V;
+}
+
+STATIC VOID R429DcDump (CONST CHAR16 *Tag) {
+  Print (L"R429 DC-B %s: CMD=%08x POW=%08x ACCESS=%08x WINOPT=%08x CLK=%08x ACTIVE=%08x BG=%08x\r\n",
+         Tag, R429DcRd (R429_DC_DISP_CMD), R429DcRd (R429_DC_POWER_CTRL), R429DcRd (R429_DC_STATE_ACCESS),
+         R429DcRd (R429_DC_WIN_OPTIONS), R429DcRd (R429_DC_CLOCK_CTRL), R429DcRd (R429_DC_ACTIVE),
+         R429DcRd (R429_DC_BG_COLOR));
+}
+
+STATIC VOID R429SorDump (CONST CHAR16 *Tag) {
+  Print (L"R429 SOR1 %s: SUPER1=%08x STATE1=%08x TEST=%08x CSTM=%08x LINK=%08x DPCFG=%08x HB=%08x VB=%08x\r\n",
+         Tag, R427Rd (R429_SOR_SUPER_STATE1), R427Rd (R429_SOR_STATE1), R427Rd (R429_SOR_TEST),
+         R427Rd (R429_SOR_CSTM), R427Rd (R427_LINKCTL0), R427Rd (R427_DP_CONFIG0),
+         R427Rd (R429_SOR_HBLANK_SYM), R427Rd (R429_SOR_VBLANK_SYM));
+}
+
+//
+// Port of coreboot tegra210 dp.c tegra_dc_dp_calc_config (2 lanes, 24 bpp).
+//
+STATIC BOOLEAN R429CalcTu (UINT32 LinkRate, UINT32 *Tu, UINT32 *Act, UINT32 *Frac, UINT32 *Pol,
+                           UINT32 *Wm, INT32 *Hb, INT32 *Vb) {
+  CONST UINT64 F = 100000;
+  CONST UINT32 Lanes = 2, Bpp = 24;
+  UINT32 NumLinkClk, ActiveCount, ActivePol, ActiveFrac = 0;
+  UINT64 Ratio, ActiveSym, ActiveCountF, FracF, Approx, Err;
+  UINT64 LowErr = 64 * F, LowFrac = 0;
+  UINT32 LowCount = 0, LowPol = 0, LowTu = 64, I;
+  BOOLEAN Neg;
+
+  if ((UINT64)R429_PCLK * Bpp >= (UINT64)LinkRate * 8 * Lanes) return FALSE;
+  NumLinkClk = (UINT32)((UINT64)LinkRate * R429_HACT / R429_PCLK);
+  Ratio = (UINT64)R429_PCLK * Bpp * F / 8;
+  Ratio = Ratio / ((UINT64)LinkRate * Lanes);
+  for (I = 64; I >= 32; --I) {
+    ActiveSym = Ratio * I;
+    ActiveCountF = (ActiveSym / F) * F;
+    FracF = ActiveSym - ActiveCountF;
+    ActiveCount = (UINT32)(ActiveCountF / F);
+    if (FracF < F / 2) {
+      ActivePol = 0;
+    } else {
+      ActivePol = 1;
+      FracF = F - FracF;
+    }
+    if (FracF != 0) {
+      FracF = (F * F) / FracF;
+      if (FracF > 15 * F)
+        ActiveFrac = ActivePol ? 1 : 15;
+      else
+        ActiveFrac = ActivePol ? (UINT32)(FracF / F) + 1 : (UINT32)(FracF / F);
+    }
+    if (ActiveFrac == 1) ActivePol = 0;
+    if (ActivePol == 1)
+      Approx = ActiveFrac ? (ActiveCountF + (ActiveFrac * F - F) * F) / (ActiveFrac * F) : ActiveCountF + F;
+    else
+      Approx = ActiveFrac ? ActiveCountF + F / ActiveFrac : ActiveCountF;
+    if (ActiveSym < Approx) {
+      Err = NumLinkClk * ((Approx - ActiveSym) / I);
+      Neg = TRUE;
+    } else {
+      Err = NumLinkClk * ((ActiveSym - Approx) / I);
+      Neg = FALSE;
+    }
+    if ((Neg && LowErr > Err) || Err == 0) {
+      LowErr = Err;
+      LowTu = I;
+      LowCount = ActiveCount;
+      LowPol = ActivePol;
+      LowFrac = ActiveFrac;
+      if (Err == 0) break;
+    }
+  }
+  if (LowFrac == 0) {
+    *Pol = 0;
+    *Act = LowPol ? LowCount : LowCount - 1;
+    *Tu = LowTu;
+    *Frac = 1;
+  } else {
+    *Pol = LowPol;
+    *Act = LowCount;
+    *Tu = LowTu;
+    *Frac = (UINT32)LowFrac;
+  }
+  *Wm = (UINT32)(((Ratio * (*Tu) * (F - Ratio)) / F + LowErr) / F) + Bpp / 4 - 1;
+  if (*Wm > 30) *Wm = 30;
+  *Hb = (INT32)((UINT64)(R429_HBP + R429_HFP + R429_HSYNC - 7) * LinkRate / R429_PCLK) - 3 - (12 / Lanes);
+  if (*Hb < 0) *Hb = 0;
+  *Vb = (INT32)((UINT64)(R429_HACT - 25) * LinkRate / R429_PCLK) - (36 / Lanes) - 4;
+  if (*Vb < 0) *Vb = 0;
+  return TRUE;
+}
+
+//
+// R433: with SOR outputs the DC clock must be the pixel clock itself (shift
+// divider 1, as coreboot and upstream Linux do); R429-R432 used PLLP / 5.5 and
+// the hub never produced HDMI. PLLD2 (the L4T DC-B parent, pll_d2_out0 = 1:1)
+// is set from the Linux tegra210 table: 38.4 MHz, M=1 N=30 SDM din 0x0E00 ->
+// VCO 1188 MHz, P=16 (hw 11) -> 74.25 MHz.
+//
+#define R433_PLLD2_BASE  0x4B8U
+#define R433_PLLD2_MISC0 0x4BCU
+#define R433_PLLD2_MISC1 0x570U
+#define R433_PLLD2_MISC2 0x574U
+#define R433_PLLD2_MISC3 0x578U
+STATIC BOOLEAN mR433PllD2;
+STATIC UINT32 mR433Fps10;
+
+STATIC BOOLEAN R433PllD2 (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  UINT32 B = Car[R433_PLLD2_BASE / 4];
+  UINTN T;
+  Print (L"R433 PLLD2 before: BASE=%08x MISC0=%08x MISC1=%08x MISC3=%08x\r\n", B, Car[R433_PLLD2_MISC0 / 4],
+         Car[R433_PLLD2_MISC1 / 4], Car[R433_PLLD2_MISC3 / 4]);
+  if ((B & R427_PLL_ENABLE) != 0) {
+    Car[R433_PLLD2_BASE / 4] = B & ~R427_PLL_ENABLE;
+    gBS->Stall (10);
+    B = Car[R433_PLLD2_BASE / 4];
+  }
+  Car[R433_PLLD2_BASE / 4] = (B | R427_PLL_IDDQ) & ~(R427_PLL_LOCK_OVERRIDE | R427_PLL_ENABLE);
+  Car[R433_PLLD2_MISC0 / 4] = 0x40000020U;
+  Car[R433_PLLD2_MISC1 / 4] = 0x90000000U;       // default 0x10000000 + SDM enable
+  Car[R433_PLLD2_MISC2 / 4] = 0;
+  Car[R433_PLLD2_MISC3 / 4] = 0x00000E00U;       // SDM din
+  gBS->Stall (1);
+  B = R427_PLL_IDDQ | (11U << 19) | (30U << 8) | 1U;
+  Car[R433_PLLD2_BASE / 4] = B;
+  gBS->Stall (2);
+  B &= ~R427_PLL_IDDQ;
+  Car[R433_PLLD2_BASE / 4] = B;
+  gBS->Stall (5);
+  Car[R433_PLLD2_BASE / 4] = B | R427_PLL_ENABLE;
+  for (T = 0; T < 1000 && (Car[R433_PLLD2_BASE / 4] & R427_PLL_LOCK) == 0; ++T) gBS->Stall (10);
+  B = Car[R433_PLLD2_BASE / 4];
+  Print (L"R433 PLLD2 after: BASE=%08x (enable=%u lock=%u after %u us) MISC1=%08x MISC3=%08x\r\n",
+         B, (B & R427_PLL_ENABLE) != 0, (B & R427_PLL_LOCK) != 0, (UINT32)(T * 10),
+         Car[R433_PLLD2_MISC1 / 4], Car[R433_PLLD2_MISC3 / 4]);
+  return (B & R427_PLL_LOCK) != 0;
+}
+
+// Count DC-B frame-end events for 500 ms; returns frames per second x 10.
+STATIC UINT32 R433MeasureFps (VOID) {
+  UINT32 Frames = 0;
+  UINTN T;
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  for (T = 0; T < 5000; ++T) {
+    gBS->Stall (100);
+    if ((R429DcRd (R429_DC_INT_STATUS) & 2U) != 0) {
+      R429DcWr (R429_DC_INT_STATUS, 2U);
+      ++Frames;
+    }
+  }
+  return Frames * 20;
+}
+
+STATIC BOOLEAN R429PowerDcb (VOID) {
+  volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINTN T;
+
+  Print (L"R430 SRC_DISP1=%08x SRC_DISP2(0x13C)=%08x old R429 reg 0x140=%08x\r\n",
+         Car[R429_CAR_SRC_DISP1 / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[0x140 / 4]);
+  Print (L"R429 before: PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
+         Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
+         Car[R429_CAR_RST_DEV_L / 4]);
+  mR433PllD2 = R433PllD2 ();
+  // disp2 mux (tegra210 mux_pllp_plld_plld2_clkm): 0 pll_p, 5 pll_d2_out0, 6 clk_m
+  Car[R429_CAR_SRC_DISP2 / 4] = mR433PllD2 ? (5U << 29) : 0;
+  if (!mR433PllD2) Print (L"R433 PLLD2 did not lock: falling back to PLLP / 5.5\r\n");
+  Car[R429_CAR_CLK_ENB_L_SET / 4] = R429_L_DISP2;
+  Car[R429_CAR_RST_DEV_L_SET / 4] = R429_L_DISP2;
+  gBS->Stall (10);
+  if ((Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) == 0) {
+    Pmc[R429_PMC_PWRGATE_TOGGLE / 4] = (1U << 8) | R429_PG_DISB;
+    for (T = 0; T < 1000 && (Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) == 0; ++T)
+      gBS->Stall (10);
+    gBS->Stall (10);
+    Pmc[R429_PMC_REMOVE_CLAMP / 4] = 1U << R429_PG_DISB;
+    gBS->Stall (10);
+  }
+  Car[R429_CAR_RST_DEV_L_CLR / 4] = R429_L_DISP2;
+  gBS->Stall (100);
+  Print (L"R429 after:  PWRGATE=%08x SRC_DISP2=%08x CLK_ENB_L=%08x RST_DEV_L=%08x\r\n",
+         Pmc[R429_PMC_PWRGATE_STATUS / 4], Car[R429_CAR_SRC_DISP2 / 4], Car[R429_CAR_CLK_OUT_ENB_L / 4],
+         Car[R429_CAR_RST_DEV_L / 4]);
+  return (Pmc[R429_PMC_PWRGATE_STATUS / 4] & (1U << R429_PG_DISB)) != 0;
+}
+
+STATIC VOID R429SetColor (UINT32 Color) {
+  R429DcWr (R429_DC_BG_COLOR, Color);
+  R429DcWr (R429_DC_STATE_CTRL, 1U << 8);
+  R429DcWr (R429_DC_STATE_CTRL, 1U);
+}
+
+//
+// R434: stage 3-2 - mirror the UEFI screen on the TV. DC-B window A scans out
+// the same framebuffer as DC-A window A (address, format, stride read back
+// from DC-A; hekate di.inl _di_winA_pitch layout). The 720x1280 portrait
+// picture is scaled to 405x720 with the DDA and centred, background black.
+//
+#define R434_DCA_BASE        0x54200000UL
+#define R434_WIN_BUF_CTRL    0x702U
+#define R434_WIN_DEPTH       0x703U
+#define R434_WIN_POSITION    0x704U
+#define R434_WIN_SIZE        0x705U
+#define R434_WIN_PRESCALED   0x706U
+#define R434_WIN_H_DDA0      0x707U
+#define R434_WIN_V_DDA0      0x708U
+#define R434_WIN_DDA_INC     0x709U
+#define R434_WIN_STRIDE      0x70AU
+#define R434_WIN_DV_CTRL     0x70EU
+#define R434_WIN_BLEND       0x716U
+#define R434_WINBUF_START    0x800U
+#define R434_WINBUF_H_OFF    0x806U
+#define R434_WINBUF_V_OFF    0x808U
+#define R434_WINBUF_KIND     0x80BU
+#define R434_WINBUF_START_HI 0x80DU
+STATIC BOOLEAN mR434Shown;
+STATIC UINT32 mR434Fb, mR434Uf;
+
+#define R435_QUICK 1
+
+STATIC VOID R434ShowUefi (VOID) {
+  volatile UINT32 *DcA = (volatile UINT32 *)R434_DCA_BASE;
+  UINT32 Hdr, Fb, Depth, Stride, Pre, Size, Opt, SrcW, SrcH, OutW, X, V;
+
+  Hdr = DcA[R429_DC_WIN_HEADER];
+  DcA[R429_DC_WIN_HEADER] = 0x10;
+  Fb = DcA[R434_WINBUF_START];
+  Depth = DcA[R434_WIN_DEPTH];
+  Stride = DcA[R434_WIN_STRIDE];
+  Pre = DcA[R434_WIN_PRESCALED];
+  Size = DcA[R434_WIN_SIZE];
+  Opt = DcA[R429_DC_WIN_OPT];
+  DcA[R429_DC_WIN_HEADER] = Hdr;
+  Print (L"R434 DC-A window A: OPT=%08x FB=%08x DEPTH=%x STRIDE=%08x PRESCALED=%08x SIZE=%08x\r\n",
+         Opt, Fb, Depth, Stride, Pre, Size);
+  SrcW = (Pre & 0x7FFFU) / 4U;
+  SrcH = (Pre >> 16) & 0x1FFFU;
+  if (Fb == 0 || SrcW == 0 || SrcH == 0) {
+#ifdef SWITCH_BOOT_CHAIN_HEKATE
+    Fb = 0xF5A00000U;
+#else
+    Fb = 0xDFB80000U;
+#endif
+    Depth = 0xC; SrcW = 720; SrcH = 1280; Stride = 720 * 4;
+    Pre = (SrcH << 16) | (SrcW * 4);
+    Print (L"R434 DC-A window A not readable: using the UEFI default framebuffer %08x\r\n", Fb);
+  }
+  OutW = (SrcW * R429_VACT) / SrcH;
+  if (OutW > R429_HACT) OutW = R429_HACT;
+  X = (R429_HACT - OutW) / 2;
+  mR434Fb = Fb;
+
+  R429DcWr (R429_DC_STATE_ACCESS, 0);
+  R429DcWr (R429_DC_WIN_HEADER, 0x10);
+  R429DcWr (R429_DC_WIN_OPT, 0);
+  R429DcWr (R434_WIN_DEPTH, Depth);
+  R429DcWr (R434_WIN_POSITION, X);
+  R429DcWr (R434_WIN_H_DDA0, 0);
+  R429DcWr (R434_WIN_V_DDA0, 0);
+  R429DcWr (R434_WIN_PRESCALED, Pre);
+  R429DcWr (R434_WIN_DDA_INC, (((SrcH * 4096U) / R429_VACT) << 16) | ((SrcW * 4096U) / OutW));
+  R429DcWr (R434_WIN_SIZE, (R429_VACT << 16) | OutW);
+  R429DcWr (R434_WIN_STRIDE, Stride);
+  R429DcWr (R434_WIN_BUF_CTRL, 0);
+  R429DcWr (R434_WIN_DV_CTRL, 0);
+  R429DcWr (R434_WINBUF_KIND, 0);
+  R429DcWr (R434_WINBUF_START, Fb);
+  R429DcWr (R434_WINBUF_START_HI, 0);
+  R429DcWr (R434_WINBUF_H_OFF, 0);
+  R429DcWr (R434_WINBUF_V_OFF, 0);
+  R429DcWr (R434_WIN_BLEND, (1U << 24) | 255U);
+  R429DcWr (R429_DC_WIN_OPT, 1U << 30);
+  R429DcWr (R429_DC_BG_COLOR, 0xFF000000U);
+  R429DcWr (R429_DC_STATE_CTRL, (1U << 8) | (1U << 9));
+  R429DcWr (R429_DC_STATE_CTRL, 1U | (1U << 1));
+  gBS->Stall (50000);
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  gBS->Stall (100000);
+  V = R429DcRd (R429_DC_INT_STATUS);
+  mR434Uf = V;
+  mR434Shown = TRUE;
+  Print (L"R434 TV should now show the UEFI screen (%ux%u -> %ux%u at x=%u, FB %08x); DC-B INT=%08x%s\r\n",
+         SrcW, SrcH, OutW, (UINT32)R429_VACT, X, Fb, V, (V & (1U << 8)) ? L" WINDOW-A UNDERFLOW" : L"");
+}
+
+STATIC VOID R429DpVideoStage3 (VOID) {
+  CONST UINT32 LinkRate = (UINT32)mR427Bw * 27000000U;
+  UINT32 Tu, Act, Frac, Pol, Wm, I, Access, Htot, Vtot, V;
+  INT32 Hb, Vb;
+  UINT8 Ls[6];
+  CONST UINT32 Colors[4] = { 0xFF0000FFU, 0xFF00FF00U, 0xFFFF0000U, 0xFFFFFFFFU };
+  CONST CHAR16 *Names[4] = { L"colour 1 (red?)", L"colour 2 (green)", L"colour 3 (blue?)", L"white" };
+
+  Print (L"\r\n---- R429 DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour) ----\r\n");
+  mR429Step = L"TU-CALC";
+  if (!R429CalcTu (LinkRate, &Tu, &Act, &Frac, &Pol, &Wm, &Hb, &Vb)) {
+    Print (L"R429 mode does not fit the link. Stopped.\r\n");
+    return;
+  }
+  mR429Tu = Tu; mR429Act = Act; mR429Frac = Frac; mR429Wm = Wm;
+  Print (L"R429 TU size %u active %u frac %u pol %u watermark %u hblank %d vblank %d\r\n",
+         Tu, Act, Frac, Pol, Wm, Hb, Vb);
+
+  mR429Step = L"DCB-POWER";
+  if (!R429PowerDcb ()) { Print (L"R429 DISB partition did not power up. Stopped.\r\n"); return; }
+  R429DcDump (L"reset state");
+
+  mR429Step = L"DCB-MODE";
+  R429DcWr (R429_DC_INT_MASK, 0);
+  R429DcWr (R429_DC_INT_ENABLE, 6U);                // R430: frame end + vblank status only (masked)
+  R429DcWr (R429_DC_STATE_ACCESS, 0);
+  for (I = 0; I < 3; ++I) {
+    R429DcWr (R429_DC_WIN_HEADER, 0x10U << I);
+    R429DcWr (R429_DC_WIN_OPT, 0);
+  }
+  R429DcWr (R429_DC_WIN_HEADER, 0);
+  R429DcWr (R429_DC_SIGNAL_OPT0, 0);
+  R429DcWr (R429_DC_TIMING_OPT, 1);
+  R429DcWr (R429_DC_IFACE_CTRL, 0);
+  R429DcWr (R429_DC_COLOR_CTRL, 8);                 // BASE888
+  R429DcWr (R429_DC_REF_TO_SYNC, (1U << 16) | 1U);
+  R429DcWr (R429_DC_SYNC_WIDTH, (R429_VSYNC << 16) | R429_HSYNC);
+  R429DcWr (R429_DC_BACK_PORCH, (R429_VBP << 16) | R429_HBP);
+  R429DcWr (R429_DC_ACTIVE, (R429_VACT << 16) | R429_HACT);
+  R429DcWr (R429_DC_FRONT_PORCH, (R429_VFP << 16) | R429_HFP);
+  R429DcWr (R429_DC_CLOCK_CTRL, mR433PllD2 ? 0U : 9U);  // R433: shift divider 1 with PLLD2
+  R429DcWr (R429_DC_BG_COLOR, Colors[0]);
+  R429DcWr (R429_DC_STATE_CTRL, (1U << 8) | (7U << 9));
+  R429DcWr (R429_DC_STATE_CTRL, 1U | (7U << 1));
+  gBS->Stall (1000);
+  R429DcDump (L"mode set");
+
+  mR429Step = L"SOR1-MODE";
+  V = R427Rd (R427_LINKCTL0);
+  V = (V & ~(0x7FU << 2)) | (Tu << 2) | 1U;
+  R427Wr (R427_LINKCTL0, V);
+  R427Wr (R427_DP_TPG, 0x50505050U);
+  V = R427Rd (R427_DP_CONFIG0);
+  V &= ~(0x3FU | (0x7FU << 8) | (0xFU << 16) | (1U << 24));
+  V |= Wm | (Act << 8) | (Frac << 16) | (Pol ? (1U << 24) : 0) | (1U << 26) | (1U << 31);
+  R427Wr (R427_DP_CONFIG0, V);
+  R427Field (R429_SOR_HBLANK_SYM, 0x1FFFFU, (UINT32)Hb);
+  R427Field (R429_SOR_VBLANK_SYM, 0x1FFFFU, (UINT32)Vb);
+  R427Wr (R429_SOR_STATE1, 2U | (8U << 8) | (1U << 6) | (5U << 17));  // head 1, DP-A, 24 bpp, + syncs
+  Htot = R429_HACT + R429_HFP + R429_HSYNC + R429_HBP;
+  Vtot = R429_VACT + R429_VFP + R429_VSYNC + R429_VBP;
+  R427Wr (R429_SOR_HEAD_STATE1, (Vtot << 16) | Htot);
+  R427Wr (R429_SOR_HEAD_STATE2, ((R429_VSYNC - 1) << 16) | (R429_HSYNC - 1));
+  R427Wr (R429_SOR_HEAD_STATE3, ((R429_VSYNC - 1 + R429_VBP) << 16) | (R429_HSYNC - 1 + R429_HBP));
+  R427Wr (R429_SOR_HEAD_STATE4, ((R429_VSYNC - 1 + R429_VBP + R429_VACT) << 16) |
+                                (R429_HSYNC - 1 + R429_HBP + R429_HACT));
+  R427Wr (R429_SOR_HEAD_STATE5, 1);
+  R427Field (R429_SOR_CSTM, (0xFU << 24) | (1U << 16), 2U << 24);
+  R429SorDump (L"mode set");
+
+  mR429Step = L"ATTACH";
+  Access = R429DcRd (R429_DC_STATE_ACCESS);
+  R429DcWr (R429_DC_STATE_ACCESS, Access | 4U);
+  R429DcWr (R429_DC_TIMING_OPT, 1);
+  R429DcWr (R429_DC_DISP_CMD, R429_DC_C_DISPLAY);
+  R429DcWr (R429_DC_STATE_ACCESS, Access);
+  R429DcWr (R429_DC_STATE_CTRL, 0x9F00);
+  R429DcWr (R429_DC_STATE_CTRL, 0x9F);
+  R429DcWr (R429_DC_POWER_CTRL, 0x00050155U);
+  if ((R427Rd (R429_SOR_TEST) & (1U << 10)) == 0) {
+    R427Wr (R429_SOR_SUPER_STATE1, 0);
+    R429DcWr (R429_DC_WIN_OPTIONS, 0);
+    R429DcWr (R429_DC_STATE_CTRL, 1);
+    gBS->Stall (17000 * 3);
+    R427Wr (R429_SOR_STATE0, 0);
+    R427Wr (R429_SOR_STATE0, 1);
+    R427Wr (R429_SOR_STATE0, 0);
+    R427Wr (R429_SOR_SUPER_STATE1, 1U << 3);
+    R427Wr (R429_SOR_SUPER_STATE1, (1U << 3) | (1U << 2) | 2U);  // attached, normal, awake
+    R427Wr (R429_SOR_SUPER_STATE0, 0);
+    R427Wr (R429_SOR_SUPER_STATE0, 1);
+    R427Wr (R429_SOR_SUPER_STATE0, 0);
+    gBS->Stall (17000 * 5);
+    R429DcWr (R429_DC_STATE_ACCESS, 1U | 4U);
+    R429DcWr (R429_DC_WIN_OPTIONS, R429_DC_SOR1_ENABLE);
+    R429DcWr (R429_DC_DISP_CMD, R429_DC_C_DISPLAY);
+    R429DcWr (R429_DC_STATE_CTRL, 1);
+  } else {
+    Print (L"R429 SOR1 already attached\r\n");
+  }
+  mR429Ok = R427Poll (R429_SOR_TEST, 3U << 8, 2U << 8, 500000);
+  mR429Test = R427Rd (R429_SOR_TEST);
+  Print (L"R429 SOR1 head %s (TEST=%08x)\r\n", mR429Ok ? L"AWAKE: attached to DC-B" : L"did NOT wake", mR429Test);
+  R429SorDump (L"attached");
+  R429DcDump (L"attached");
+  mR433Fps10 = R433MeasureFps ();
+  Print (L"R433 DC-B measured about %u.%u frames/s (want 60.0; clock %s)\r\n", mR433Fps10 / 10, mR433Fps10 % 10,
+         mR433PllD2 ? L"PLLD2 74.25 MHz" : L"PLLP/5.5");
+  R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+  gBS->Stall (100000);
+  V = R429DcRd (R429_DC_INT_STATUS);
+  Print (L"R430 DC-B INT_STATUS after 100 ms=%08x: %s\r\n", V,
+         (V & 2U) ? L"frames are running (pixel clock OK)" : L"NO frame end - DC-B is not scanning");
+  if (R427DpcdR (0x200, Ls, 6))
+    Print (L"R429 DPCD 200..205: sink count %02x irq %02x lanes %02x %02x align %02x sink %02x\r\n",
+           Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
+  mR429Step = mR429Ok ? L"DONE" : L"NOT-AWAKE";
+
+  // R435: no colour sequence and no 20 s hold (stage 4: boot straight on to Windows)
+  for (I = 0; I < (R435_QUICK ? 0U : 4U); ++I) {
+    R429SetColor (Colors[I]);
+    Print (L"R429 TV should now show %s (BG=%08x)\r\n", Names[I], Colors[I]);
+    if (I < 3) gBS->Stall (2000000);
+  }
+  R434ShowUefi ();
+  // R431: identify the dock's DP->HDMI converter and watch the stream for 20 s
+  {
+    UINT8 Br[12], Dp[4];
+    UINTN Sec;
+    if (R427DpcdR (0x500, Br, 12))
+      Print (L"R431 branch OUI %02x%02x%02x id '%c%c%c%c%c%c' hw %02x fw %02x.%02x\r\n", Br[0], Br[1], Br[2],
+             Br[3] >= 0x20 && Br[3] < 0x7F ? Br[3] : '.', Br[4] >= 0x20 && Br[4] < 0x7F ? Br[4] : '.',
+             Br[5] >= 0x20 && Br[5] < 0x7F ? Br[5] : '.', Br[6] >= 0x20 && Br[6] < 0x7F ? Br[6] : '.',
+             Br[7] >= 0x20 && Br[7] < 0x7F ? Br[7] : '.', Br[8] >= 0x20 && Br[8] < 0x7F ? Br[8] : '.',
+             Br[9], Br[10], Br[11]);
+    if (R427DpcdR (0x080, Dp, 4))
+      Print (L"R431 downstream port 0 caps %02x %02x %02x %02x (DPCD 0x005=%02x 0x007=%02x)\r\n",
+             Dp[0], Dp[1], Dp[2], Dp[3], mR426Dpcd[5], mR426Dpcd[7]);
+    if (!R435_QUICK)
+      Print (L"R431 holding white for 20 s - please watch the TV now\r\n");
+    for (Sec = 1; Sec <= (R435_QUICK ? 1U : 20U); ++Sec) {
+      R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
+      gBS->Stall (1000000);
+      V = R429DcRd (R429_DC_INT_STATUS);
+      if (Sec == 1)
+        Print (L"R432 SOR DP_MN0=%08x MN1=%08x\r\n", R427Rd (0x5A), R427Rd (0x5B));
+      if (R427DpcdR (0x200, Ls, 6))
+        Print (L"R431 t=%2us DC INT=%08x TEST=%08x DPCD200 %02x %02x %02x %02x %02x %02x\r\n",
+               (UINT32)Sec, V, R427Rd (R429_SOR_TEST), Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
+    }
+  }
+  if (R427DpcdR (0x200, Ls, 6))
+    Print (L"R430 DPCD 200..205 at end: sink count %02x irq %02x lanes %02x %02x align %02x sink status %02x (01 = stream in sync)\r\n",
+           Ls[0], Ls[1], Ls[2], Ls[3], Ls[4], Ls[5]);
+}
+
+STATIC VOID R429PrintSummary (VOID) {
+  if (mR429Step == NULL) return;
+  if (mR434Shown)
+    Print (L"R434 TV MIRROR: UEFI screen from FB %08x on DC-B window A (INT %08x)\r\n", mR434Fb, mR434Uf);
+  Print (L"R429 DP-VIDEO: %s at %s; 1280x720@60 TU %u act %u frac %u wm %u; SOR TEST %08x\r\n",
+         mR429Ok ? L"DONE" : L"STOPPED", mR429Step, mR429Tu, mR429Act, mR429Frac, mR429Wm, mR429Test);
+}
+
+STATIC VOID R424DpAltStage1 (VOID) {
+  CONST UINT8 DiscId[6]   = { BM_OUTGOING_VDM, 4, 0x01, 0x80, 0x00, 0xFF };
+  CONST UINT8 EnterNin[6] = { BM_OUTGOING_VDM, 4, 0x04, 0x81, 0x7E, 0x05 };
+  CONST UINT8 Query[10]   = { BM_OUTGOING_VDM, 8, 0x00, 0x00, 0x7E, 0x05, 0x00, 0x01, 0x16, 0x00 };
+  CONST UINT8 HubOn[10]   = { BM_OUTGOING_VDM, 8, 0x00, 0x00, 0x7E, 0x05, 0x01, 0x01, 0x20, 0x00 };
+  // LED: fade 64, time off 0, time on 0, duty 128 (L4T bm92t_usbhub_led_cfg).
+  CONST UINT8 Led[14]     = { BM_OUTGOING_VDM, 12, 0x00, 0x00, 0x7E, 0x05, 0x01, 0x01, 0x01, 0x00,
+                              64, 0, 0, 128 };
+  UINT8 Vdm[29], Caps[5], Cfg[6];
+  UINT16 S1 = 0, A;
+  UINT32 S = 0, W0, W2, Pm, Cnf;
+  UINT8 Pin;
+  UINTN I, Lanes = 0, Retry;
+  BOOLEAN Hpd, LastHpd;
+  UINT16 LastDp;
+
+  Print (L"\r\n---- R424 DP Alt Mode stage 1 (BM92T) ----\r\n");
+  R424PrintState (L"start");
+  if (!R288Read16 (BM_STATUS1, &S1, &S) || ((S1 & BM_DR_MASK) >> BM_DR_SHIFT) != BM_DR_DFP) {
+    Print (L"R424 the Switch is not DFP (S1=%04x); DP Alt Mode needs DFP. Skipped.\r\n", S1);
+    R424Fail (R424_NOT_DFP);
+    return;
+  }
+  // L4T writes DP_ALERT_EN = 0 unless rohm,dp-alerts-enable (not in the DT).
+  if (!R288Write16 (BM_DP_ALERT_EN, 0x0000, &S))
+    Print (L"R424 DP_ALERT_EN write FAIL I2C=%08x (continuing)\r\n", S);
+
+  mR424Step = R424_DISC_ID;
+  if (!R424VdmExchange (L"DISCOVER-ID", DiscId, sizeof (DiscId), Vdm) || Vdm[1] != (0x40 | 0x01) || Vdm[0] < 16) {
+    Print (L"R424 Discover Identity: no ACK (cmd byte %02x len %u)\r\n", Vdm[1], Vdm[0]);
+    R424Fail (R424_DISC_ID);
+    return;
+  }
+  W0 = R363Le32 (&Vdm[5]);     // ID header: VID 15:0, product type 29:27
+  W2 = R363Le32 (&Vdm[13]);    // product VDO: bcdDevice 15:0, PID 31:16
+  mR424Vid = (UINT16)(W0 & 0xFFFFU);
+  mR424IdType = (UINT8)((W0 >> 27) & 7U);
+  mR424Pid = (UINT16)(W2 >> 16);
+  Print (L"R424 partner VID=%04x PID=%04x type=%u (5=alternate mode adapter) bcd=%04x\r\n",
+         mR424Vid, mR424Pid, mR424IdType, W2 & 0xFFFFU);
+
+  // R432: a third-party hub that answers as the Nintendo dock (057E:2003) gets
+  // no HDMI out in Nintendo mode (R431H: stream in sync, TV no signal) but works
+  // with a MacBook. Prefer the standard DP SVID (FF01) when the partner offers it.
+  if (mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U) {
+    Print (L"R432 partner answers as Nintendo dock: trying the standard DP SVID first (like a PC).\r\n");
+    if (R424ReadGenericModes ()) {
+      mR424Generic = TRUE;
+      mR432StdDp = TRUE;
+      Print (L"R432 standard DP Alt Mode offered: entering DP mode without Nintendo mode.\r\n");
+    } else {
+      Print (L"R432 no standard DP mode offered: using the Nintendo path.\r\n");
+    }
+  }
+  if (mR432StdDp) {
+    // standard DP chosen above
+  } else if (!(mR424IdType == 5 && mR424Vid == 0x057EU && mR424Pid == 0x2003U)) {
+    Print (L"R424 not a Nintendo dock: reading SVIDs/modes.\r\n");
+    mR424Step = R424_NOT_DOCK;
+    if (!R424ReadGenericModes ()) return;
+    if (!R424_GENERIC_DP_ENTER) {
+      Print (L"R424 DP Alt Mode not entered (R424_GENERIC_DP_ENTER=0).\r\n");
+      return;
+    }
+    mR424Generic = TRUE;
+    Print (L"R425 generic DP Alt Mode partner: entering DP mode (no Nintendo mode, no dock VDMs).\r\n");
+  } else {
+    mR424Step = R424_ENTER_NIN;
+    if (!R424VdmExchange (L"ENTER-NINTENDO", EnterNin, sizeof (EnterNin), Vdm) ||
+        Vdm[1] != (0x40 | 0x04) || Vdm[2] != 0x81 || Vdm[3] != 0x7E || Vdm[4] != 0x05) {
+      Print (L"R424 Enter Nintendo Alt Mode: not ACKed\r\n");
+      R424Fail (R424_ENTER_NIN);
+      return;
+    }
+    Print (L"R424 Nintendo Alt Mode entered.\r\n");
+  }
+
+  mR424Step = R424_DP_ENTER;
+  R424DrainAlerts ();
+  if (!R424SendCmd (BM_CMD_DP_ENTER_MODE)) { R424Fail (R424_DP_ENTER); return; }
+  gBS->Stall (100000);
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 3000);
+  R288Read16 (BM_STATUS1, &S1, &S);
+  Print (L"R424 DP_ENTER_MODE: alerts=%04x S1=%04x lastcmd=%u\r\n", A, S1, (S1 >> 4) & 7U);
+  if ((A & BM_ALERT_CMD_DONE) == 0) { R424Fail (R424_DP_ENTER); return; }
+
+  mR424Step = R424_DP_CAPS;
+  if (!R363ReadBlock (BM_ADDR, BM_INCOMING_VDM, Caps, sizeof (Caps), &S)) {
+    Print (L"R424 DP capabilities read FAIL I2C=%08x\r\n", S);
+    R424Fail (R424_DP_CAPS);
+    return;
+  }
+  Print (L"R424 DP caps: len=%u %02x %02x %02x %02x (plug pins %02x, receptacle pins %02x)\r\n",
+         Caps[0], Caps[1], Caps[2], Caps[3], Caps[4], Caps[2], Caps[3]);
+  // L4T bm92t_handle_dp_config_and_hpd: primary pin D for 2 lanes, then C.
+  // The dock reports a plug but uses the receptacle field (it ignores it).
+  // Generic partners (R425): a plug is matched against the plug pin field
+  // (Caps[2]), a receptacle against the receptacle field (Caps[3]); both put
+  // the chosen pin in VDO byte 1 (Cfg[3]), as L4T does.
+  Cfg[0] = BM_OUTGOING_VDM; Cfg[1] = 4;
+  Cfg[2] = R424_VDO_DP_SUPPORT | R424_VDO_DP_U_UFP_D;
+  Cfg[3] = 0; Cfg[4] = 0; Cfg[5] = 0;
+  Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_C : R424_VDO_DP_PIN_D;
+  for (I = 0; I < 2; ++I) {
+    if (!mR424Generic) {
+      if ((Caps[3] & Pin) != 0) {
+        Cfg[4] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
+    } else if ((Caps[1] & R424_VDO_DP_RECEPTACLE) == 0) {
+      if ((Caps[2] & Pin) != 0) {
+        Cfg[3] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
+    } else {
+      if ((Caps[3] & Pin) != 0) {
+        Cfg[3] = Pin;
+        Lanes = (Pin == R424_VDO_DP_PIN_C) ? 4 : 2;
+        break;
+      }
+    }
+    Pin = (R424_DP_LANES == 4) ? R424_VDO_DP_PIN_D : R424_VDO_DP_PIN_C;
+  }
+  if (Caps[0] != 4 || Lanes == 0) {
+    Print (L"R424 no usable DP pin assignment (C/D)\r\n");
+    R424Fail (R424_DP_CAPS);
+    return;
+  }
+  Print (L"R424 DP configure: pin %c (%u lanes on the cable, SOR1 uses %u) VDO %02x %02x %02x %02x\r\n",
+         (Pin == R424_VDO_DP_PIN_C) ? L'C' : L'D', (UINT32)Lanes,
+         (UINT32)(Lanes > R424_DP_LANES ? R424_DP_LANES : Lanes), Cfg[2], Cfg[3], Cfg[4], Cfg[5]);
+
+  mR424Step = R424_DP_CFG;
+  R424DrainAlerts ();
+  R424WaitNotBusy ();
+  if (!R424WriteBlock (Cfg, sizeof (Cfg), &S)) {
+    Print (L"R424 DP configure VDO write FAIL I2C=%08x\r\n", S);
+    R424Fail (R424_DP_CFG);
+    return;
+  }
+  if (!R424SendCmd (BM_CMD_DP_CFG_START_HPD)) { R424Fail (R424_DP_CFG); return; }
+  A = R424WaitAlert (BM_ALERT_CMD_DONE, 3000);
+  R288Read16 (BM_STATUS1, &S1, &S);
+  Print (L"R424 DP_CFG_AND_START_HPD: alerts=%04x S1=%04x lastcmd=%u (0=complete 2=aborted 4=invalid 6=rejected 7=terminated)\r\n",
+         A, S1, (S1 >> 4) & 7U);
+  if ((A & BM_ALERT_CMD_DONE) == 0 || (S1 & BM_INSERT) == 0 || ((S1 >> 4) & 7U) != 0) {
+    R424Fail (R424_DP_CFG);
+    R424PrintState (L"after DP configure");
+    return;
+  }
+  R424PrintState (L"DP configured");
+
+  // Nintendo dock VDMs (failures here are reported but do not undo DP).
+  if (mR424Generic) {
+    Print (L"R425 generic partner: dock VDMs skipped.\r\n");
+    goto R424Watch;
+  }
+  mR424Step = R424_DOCK_STATE;
+  if (R424VdmExchange (L"DOCK-STATE", Query, sizeof (Query), Vdm) && Vdm[6] == 2 && Vdm[7] == 0x17)
+    Print (L"R424 dock state: %02x %02x %02x %02x%s\r\n", Vdm[9], Vdm[10], Vdm[11], Vdm[12],
+           (Vdm[11] & 0x02) ? L" (old dock FW: L4T switches USB to device mode)" : L"");
+  else
+    Print (L"R424 dock state: no valid reply\r\n");
+
+  mR424Step = R424_DOCK_LED;
+  if (!R424VdmExchange (L"DOCK-LED", Led, sizeof (Led), Vdm)) Print (L"R424 dock LED: no reply\r\n");
+
+  mR424Step = R424_DOCK_HUB;
+  gBS->Stall (500000);   // L4T: wait for the hub to power up
+  for (Retry = 0; Retry < 10; ++Retry) {
+    if (!R424VdmExchange (L"DOCK-HUB", HubOn, sizeof (HubOn), Vdm)) {
+      Print (L"R424 dock USB hub enable: no reply\r\n");
+      break;
+    }
+    if (Vdm[6] == 2 && Vdm[7] == 0x21 && (Vdm[5] & 1U) != 0) {
+      Print (L"R424 dock hub busy, retry %u\r\n", (UINT32)(Retry + 1));
+      gBS->Stall (250000);
+      continue;
+    }
+    Print ((Vdm[6] == 2 && Vdm[7] == 0x21) ? L"R424 dock USB hub enabled.\r\n" :
+                                             L"R424 dock USB hub: unexpected reply\r\n");
+    break;
+  }
+R424Watch:
+  mR424Step = R424_DONE;
+
+  // Watch DP status / HPD for 10 s so a TV switched on or an HDMI cable
+  // plugged now shows up; print only changes.
+  Print (L"R424 watching DP status and HPD for 10 s (switch the TV on / plug HDMI now)...\r\n");
+  R424PrintState (L"t=0");
+  LastDp = mR424DpStatus;
+  LastHpd = mR424Hpd;
+  for (I = 1; I <= 20; ++I) {
+    gBS->Stall (500000);
+    if (R288Read16 (BM_DP_STATUS, &mR424DpStatus, &S)) {
+      R424ReadHpd (&Pm, &Cnf, &Hpd);
+      mR424Hpd = Hpd;
+      if (mR424DpStatus != LastDp || Hpd != LastHpd) {
+        Print (L"R424 t=%u.%us DP=%04x SIGNAL=%u HPD=%u\r\n", (UINT32)(I / 2), (UINT32)((I % 2) * 5),
+               mR424DpStatus, (mR424DpStatus & BM_DP_STATUS_SIGNAL_ON) != 0, Hpd);
+        LastDp = mR424DpStatus;
+        LastHpd = Hpd;
+      }
+    }
+  }
+  R424PrintState (L"end");
+  R426DpAuxStage2a ();
+  if (mR426Ok) R427DpLinkStage2b ();
+  if (mR427Ok) R429DpVideoStage3 ();
+}
+
+STATIC VOID R424PrintSummary (VOID) {
+  if (mR424Step == R424_NOT_RUN) return;
+  Print (L"R424 DP-ALT: %s at %s%s; partner %04x:%04x type %u; DP=%04x (DP_EN=%u SIGNAL=%u) HPD=%u\r\n",
+         mR424Failed ? L"STOPPED" : (mR424Step == R424_DONE ? L"DONE" : L"READ-ONLY"),
+         R424StepName (mR424Step), mR424Generic ? L" (generic)" : L"",
+         mR424Vid, mR424Pid, mR424IdType, mR424DpStatus,
+         (mR424DpStatus & BM_DP_STATUS_DP_EN) != 0, (mR424DpStatus & BM_DP_STATUS_SIGNAL_ON) != 0,
+         mR424Hpd);
+}
+
 // R412: hekate (L4T launcher) chain. coreboot's clock_init() runs init_pllu()
 // and init_utmip_pll() on every boot (soc/nvidia/tegra210/clock.c); hekate
 // enables PLLU only for its own USB gadget mode and never programs the UTMIP
@@ -4901,8 +6627,25 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R423H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R440H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
+  Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
+  Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
+  Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");
+  Print (L" R427: DP Alt Mode stage 2b (PLLDP, SOR1 pads/lanes, DP link training; no video)\r\n");
+  Print (L" R428: PLLDP always programmed to 270 MHz (R427H kept a 377.6 MHz PLLDP; EQ failed)\r\n");
+  Print (L" R429: DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour on the TV)\r\n");
+  Print (L" R430: disp2 clock source at the right register (0x13C), DC-B frame/stream checks\r\n");
+  Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
+  Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
+  Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R440: LDO8 (SOR1 pads) on at every boot for Windows hot-plug; stop before the pad clock if the pads have no power\r\n");
+  Print (L" R439: SOR1 pad power: MAX77620 LDO8 vdd-hdmi-dp 1.05 V on, HDMI pad DPD off (was left on by earlier boots)\r\n");
+  Print (L" R438: a line per DPCD-setup step after the SOR1 pads come up\r\n");
+  Print (L" R437: DP Alt tried -> end-of-UEFI disp2/DC-B state and a 15 s hold, always\r\n");
+  Print (L" R436: 15 s hold with a reason when a partner is attached but the TV was not started\r\n");
+  Print (L" R435: no colour sequence / 20 s hold; DC-B left running for Windows (switchdisplay 1.3.0 TV mirror)\r\n");
+  Print (L" R434: the UEFI screen mirrored on the TV (DC-B window A, same framebuffer, scaled 405x720)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
   Print (L" host or sink gate -> VBUS/charge -> path -> firmware/Falcon -> PADCTL -> XhciDxe\r\n");
   Print (L"============================================================\r\n\r\n");
@@ -4982,6 +6725,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
     }
   }
   Print (L"BM92T source mode CONFIG1=%04x readback PASS.\r\n", TargetConfig1);
+  // R440: SOR1 pad rail on at every boot, so Windows (switchdisplay 1.4.0) can
+  // bring the TV up when a hub is plugged in later (it cannot reach the PMIC).
+  R439PadPower ();
   Print (L"Waiting up to 30s: host = INSERT+SRC_MODE+OTG_INSERT, sink = INSERT+VSAFE+!SRC_MODE+!DFP (3 samples)...\r\n");
   for (I = 0; I < R288_HOST_POLLS; ++I) {
     if (!R288Read16 (BM_STATUS1, &Status1, &S) ||
@@ -5027,6 +6773,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
       goto R288Cleanup;
     }
     mR363SinkMode = TRUE;
+    R424DpAltStage1 ();
     goto R363PathSetup;
   }
   if (!HostGatePassed) {
@@ -5177,6 +6924,30 @@ R288Cleanup:
          mR412PlluAtStart, mR412PlluAfter,
          mR412PlluStarted ? L" (started by R412)" : L"", mR412UtmipSet ? L" UTMIP set" : L"",
          mR413PadctlReleased ? L" PADCTL reset released" : L"");
+  R424PrintSummary ();
+  R426PrintSummary ();
+  R427PrintSummary ();
+  R429PrintSummary ();
+  // R437: whenever DP Alt was tried, show the state Windows will inherit
+  // (disp2 clock/reset in CAR, DC-B scan) and hold 15 s for a photo.
+  if (mR424Step != R424_NOT_RUN) {
+    volatile UINT32 *Car = (volatile UINT32 *)0x60006000UL;
+    UINT32 ClkL = Car[0x10 / 4], RstL = Car[0x04 / 4];
+    BOOLEAN On = (ClkL & (1U << 26)) != 0 && (RstL & (1U << 26)) == 0;
+    Print (L"R437 END OF UEFI: CAR CLK_L=%08x RST_L=%08x -> disp2 %s\r\n", ClkL, RstL,
+           On ? L"ON" : L"OFF (Windows will see no TV)");
+    if (On)
+      Print (L"R437 DC-B cmd=%08x winopt=%08x active=%08x  TV shown by R434: %s\r\n",
+             R429DcRd (R429_DC_DISP_CMD), R429DcRd (R429_DC_WIN_OPTIONS), R429DcRd (R429_DC_ACTIVE),
+             mR434Shown ? L"yes" : L"NO");
+    Print (L"R437 holding 15 s - please photograph the lines from R424 DP-ALT down\r\n");
+    gBS->Stall (15000000);
+  } else if (!mR434Shown && (SinkGatePassed || HostGatePassed)) {
+    Print (L"R436 TV NOT STARTED: path %s, DP Alt %s - holding 15 s for a photo\r\n",
+           SinkGatePassed ? L"SINK (hub with power)" : L"HOST (no power from the hub: DP Alt is only tried on the sink path)",
+           mR424Step == R424_NOT_RUN ? L"not run" : R424StepName (mR424Step));
+    gBS->Stall (15000000);
+  }
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

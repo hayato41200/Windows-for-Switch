@@ -6586,7 +6586,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R436H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R437H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6598,6 +6598,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R437: DP Alt tried -> end-of-UEFI disp2/DC-B state and a 15 s hold, always\r\n");
   Print (L" R436: 15 s hold with a reason when a partner is attached but the TV was not started\r\n");
   Print (L" R435: no colour sequence / 20 s hold; DC-B left running for Windows (switchdisplay 1.3.0 TV mirror)\r\n");
   Print (L" R434: the UEFI screen mirrored on the TV (DC-B window A, same framebuffer, scaled 405x720)\r\n");
@@ -6880,9 +6881,21 @@ R288Cleanup:
   R426PrintSummary ();
   R427PrintSummary ();
   R429PrintSummary ();
-  // R436: something is plugged in but the TV was not started - keep the lines
-  // above on screen for a photo (R435 no longer waits anywhere).
-  if (!mR434Shown && (SinkGatePassed || HostGatePassed)) {
+  // R437: whenever DP Alt was tried, show the state Windows will inherit
+  // (disp2 clock/reset in CAR, DC-B scan) and hold 15 s for a photo.
+  if (mR424Step != R424_NOT_RUN) {
+    volatile UINT32 *Car = (volatile UINT32 *)0x60006000UL;
+    UINT32 ClkL = Car[0x10 / 4], RstL = Car[0x04 / 4];
+    BOOLEAN On = (ClkL & (1U << 26)) != 0 && (RstL & (1U << 26)) == 0;
+    Print (L"R437 END OF UEFI: CAR CLK_L=%08x RST_L=%08x -> disp2 %s\r\n", ClkL, RstL,
+           On ? L"ON" : L"OFF (Windows will see no TV)");
+    if (On)
+      Print (L"R437 DC-B cmd=%08x winopt=%08x active=%08x  TV shown by R434: %s\r\n",
+             R429DcRd (R429_DC_DISP_CMD), R429DcRd (R429_DC_WIN_OPTIONS), R429DcRd (R429_DC_ACTIVE),
+             mR434Shown ? L"yes" : L"NO");
+    Print (L"R437 holding 15 s - please photograph the lines from R424 DP-ALT down\r\n");
+    gBS->Stall (15000000);
+  } else if (!mR434Shown && (SinkGatePassed || HostGatePassed)) {
     Print (L"R436 TV NOT STARTED: path %s, DP Alt %s - holding 15 s for a photo\r\n",
            SinkGatePassed ? L"SINK (hub with power)" : L"HOST (no power from the hub: DP Alt is only tried on the sink path)",
            mR424Step == R424_NOT_RUN ? L"not run" : R424StepName (mR424Step));

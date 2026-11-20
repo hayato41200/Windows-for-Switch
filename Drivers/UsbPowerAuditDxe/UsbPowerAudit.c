@@ -5554,6 +5554,33 @@ STATIC VOID R427SetLinkRate (UINT8 Bw) {
   gBS->Stall (300);
 }
 
+// R439: SOR1 pad power. L4T DT (dc1 node): vdd-dp-pad-supply = MAX77620 LDO8
+// "vdd-hdmi-dp" 1.05 V, FPS source none, i.e. OFF after a full power-off.
+// R428H-R434H only worked because an earlier boot had left LDO8 on (the PMIC
+// keeps it through a reboot); after a real power-off R437H/R438H/R434H saw
+// termination calibration run to 15 and then an SError once SOR1 switched to
+// the pad clock. Also take the HDMI pads out of deep power-down (PMC
+// IO_DPD_REQ bit 28, L4T pinctrl "hdmi-dpd-disable").
+#define R439_LDO8_CFG        0x33
+#define R439_FPS_LDO8        0x4E
+#define R439_PMC_IO_DPD_REQ  0x1B8U
+#define R439_PMC_IO_DPD_STAT 0x1BCU
+#define R439_DPD_HDMI        (1U << 28)
+STATIC UINT8 R404Ldo (UINT8 CfgReg, UINT8 FpsReg);
+
+STATIC VOID R439PadPower (VOID) {
+  volatile UINT32 *Pmc = (volatile UINT32 *)0x7000E400UL;
+  UINT8 Before = 0, After;
+  UINT32 Dpd0 = Pmc[R439_PMC_IO_DPD_STAT / 4];
+  if (i2c_recv_buf_small (&Before, 1, I2C_5, MAX77620_ADDR, R439_LDO8_CFG) != 1) Before = 0xEE;
+  After = R404Ldo (R439_LDO8_CFG, R439_FPS_LDO8);
+  Pmc[R439_PMC_IO_DPD_REQ / 4] = (1U << 30) | R439_DPD_HDMI;      // code 1 = DPD off
+  gBS->Stall (100);
+  Print (L"R439 SOR1 pad power: vdd-hdmi-dp (MAX77620 LDO8) %02x -> %02x (%s); HDMI pad DPD %u -> %u\r\n",
+         Before, After, (After >> 6) == 3 ? L"ON 1.05 V" : L"NOT on", (Dpd0 & R439_DPD_HDMI) != 0,
+         (Pmc[R439_PMC_IO_DPD_STAT / 4] & R439_DPD_HDMI) != 0);
+}
+
 STATIC VOID R427DpLinkStage2b (VOID) {
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   CONST UINT8 Rates[2] = { 0x0A, 0x06 };
@@ -5562,6 +5589,7 @@ STATIC VOID R427DpLinkStage2b (VOID) {
   UINT8 One;
 
   Print (L"\r\n---- R427 DP Alt Mode stage 2b (SOR1 + link training, no video) ----\r\n");
+  R439PadPower ();
   mR427Step = L"PLLDP";
   if (!R427PllDp ()) { Print (L"R427 PLLDP did not lock. Stopped.\r\n"); return; }
 
@@ -6592,7 +6620,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R438H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R439H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6604,6 +6632,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R439: SOR1 pad power: MAX77620 LDO8 vdd-hdmi-dp 1.05 V on, HDMI pad DPD off (was left on by earlier boots)\r\n");
   Print (L" R438: a line per DPCD-setup step after the SOR1 pads come up\r\n");
   Print (L" R437: DP Alt tried -> end-of-UEFI disp2/DC-B state and a 15 s hold, always\r\n");
   Print (L" R436: 15 s hold with a reason when a partner is attached but the TV was not started\r\n");

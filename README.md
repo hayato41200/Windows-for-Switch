@@ -39,9 +39,11 @@ EDK2 platform package, whose history is kept here). It adds:
 | Bluetooth (keyboard, audio) | UEFI R390 (chip power, DSDT BTH0) + `switchbt.sys` + inbox BthMini. Bring your own `BCM4356A3.hcd` patch. Range is very short for now |
 | Wi-Fi (beta): WPA2-Personal connect, DHCP, internet access; Wi-Fi 5 (802.11ac), 866/866 Mbit/s | UEFI R404/R405 (PCIe port 1, BCM4356, DSDT WLN0) + `switchwlan.sys` 0.6.13 (beta, in Windows-for-Switch-Drivers). Bring your own `brcmfmac4356(A3)-pcie.bin/.txt` firmware (tested 7.35.252.108). Tested 2026-11-08: fast.com 55 Mbit/s down / 39 Mbit/s up |
 | Audio: speakers and the 3.5 mm headphone jack (switches automatically when headphones are plugged in or out) | UEFI R402 (APE clocks, ADMA/ADMAIF/XBAR/I2S1, ALC5639 codec, DSDT AUD0) and R403 (headphone path, jack switch PV6) + `switchaudio.sys` 1.0.0.7 (PortCls WaveRT, 48 kHz 16-bit stereo) |
+| TV output over USB-C DisplayPort Alt Mode (a USB-C hub with DP Alt and its own power, 1280x720), including plugging the hub in after Windows has started | UEFI R424–R441 (BM92T DP Alt Mode, DPAUX1, SOR1 link training, DC-B and PLLD2, SOR1 pad rail LDO8) + `switchbattery.sys` 1.0.0.7 + `switchdisplay.sys` 1.4.4 (beta). Tested on 2026-11-20 on the hekate boot chain; history in `docs/dp-alt-plan-ja.md` (Japanese) |
 | Clock kept across reboots | `switchrtc.sys` reads the MAX77620 RTC (never writes it, Horizon keeps using it) and applies an offset learned at the last time sync |
 
 Not done: GPU acceleration (basic display only), Joy-Con rail, sleep.
+TV output, planned: the TV as a second (extended) display (today it mirrors the built-in screen); modes other than 1280x720 (from the TV's EDID); HDMI audio; a check with the official Nintendo dock (tested with a third-party DP Alt hub); DP Alt with unpowered hubs and adapters (today DP Alt Mode is entered only when the hub supplies power).
 Audio limits: the speakers and the headphones are one Windows output ("Speakers") and share one volume, so turn the volume down before plugging headphones in; the codec level is fixed (speakers -18 dB, headphones -24 dB); no microphone.
 
 ## Tested OS

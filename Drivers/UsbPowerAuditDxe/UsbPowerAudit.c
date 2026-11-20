@@ -6627,7 +6627,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R440H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R441H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6639,6 +6639,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R441: release build of the DP Alt work (no 15 s holds at the end)\r\n");
   Print (L" R440: LDO8 (SOR1 pads) on at every boot for Windows hot-plug; stop before the pad clock if the pads have no power\r\n");
   Print (L" R439: SOR1 pad power: MAX77620 LDO8 vdd-hdmi-dp 1.05 V on, HDMI pad DPD off (was left on by earlier boots)\r\n");
   Print (L" R438: a line per DPCD-setup step after the SOR1 pads come up\r\n");
@@ -6940,13 +6941,10 @@ R288Cleanup:
       Print (L"R437 DC-B cmd=%08x winopt=%08x active=%08x  TV shown by R434: %s\r\n",
              R429DcRd (R429_DC_DISP_CMD), R429DcRd (R429_DC_WIN_OPTIONS), R429DcRd (R429_DC_ACTIVE),
              mR434Shown ? L"yes" : L"NO");
-    Print (L"R437 holding 15 s - please photograph the lines from R424 DP-ALT down\r\n");
-    gBS->Stall (15000000);
   } else if (!mR434Shown && (SinkGatePassed || HostGatePassed)) {
-    Print (L"R436 TV NOT STARTED: path %s, DP Alt %s - holding 15 s for a photo\r\n",
+    Print (L"R436 TV NOT STARTED: path %s, DP Alt %s\r\n",
            SinkGatePassed ? L"SINK (hub with power)" : L"HOST (no power from the hub: DP Alt is only tried on the sink path)",
            mR424Step == R424_NOT_RUN ? L"not run" : R424StepName (mR424Step));
-    gBS->Stall (15000000);
   }
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");

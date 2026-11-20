@@ -5604,15 +5604,21 @@ STATIC VOID R427DpLinkStage2b (VOID) {
   R427Dump (L"pads up");
 
   mR427Step = L"DPCD-SETUP";
+  // R438: one line per step (R437H stopped right after "pads up")
+  Print (L"R438 a: AUXCTL=%08x AUXSTAT=%08x, DPCD 600 <- 01\r\n", R426Rd (R426_AUXCTL), R426Rd (R426_AUXSTAT));
   if (!R427DpcdW1 (0x600, 0x01)) return;               // D0
   gBS->Stall (1000);
+  Print (L"R438 b: DPCD 108/107\r\n");
   R427DpcdW1 (0x108, 0x01);                             // 8b/10b
   R427DpcdW1 (0x107, 0x00);                             // no downspread
+  Print (L"R438 c: DP_CONFIG0 / LINKCTL0\r\n");
   R427Field (R427_DP_CONFIG0, 1U << 28, 1U << 28);      // idle before attach
   R427Field (R427_LINKCTL0, (1U << 14) | 1U, ((mR426Dpcd[2] & 0x80) ? (1U << 14) : 0) | 1U);
+  Print (L"R438 d: XBAR\r\n");
   V = (2U << 2) | (1U << 5) | (0U << 8) | (3U << 11) | (4U << 14);
   R427Field (R427_XBAR_CTRL, 0x3U | (0x7FFFU << 2), V);
   R427Wr (R427_XBAR_POL, 0);
+  Print (L"R438 e: setup done\r\n");
 
   for (R = 0; R < 2; ++R) {
     mR427Bw = Rates[R];
@@ -6586,7 +6592,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R437H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R438H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6598,6 +6604,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R438: a line per DPCD-setup step after the SOR1 pads come up\r\n");
   Print (L" R437: DP Alt tried -> end-of-UEFI disp2/DC-B state and a 15 s hold, always\r\n");
   Print (L" R436: 15 s hold with a reason when a partner is attached but the TV was not started\r\n");
   Print (L" R435: no colour sequence / 20 s hold; DC-B left running for Windows (switchdisplay 1.3.0 TV mirror)\r\n");

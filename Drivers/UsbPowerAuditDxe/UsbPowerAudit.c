@@ -6586,7 +6586,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R435H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R436H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6598,6 +6598,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R436: 15 s hold with a reason when a partner is attached but the TV was not started\r\n");
   Print (L" R435: no colour sequence / 20 s hold; DC-B left running for Windows (switchdisplay 1.3.0 TV mirror)\r\n");
   Print (L" R434: the UEFI screen mirrored on the TV (DC-B window A, same framebuffer, scaled 405x720)\r\n");
   Print (L" Nintendo Switch UEFI XUSB bring-up R414 (XUSB partitions, keep hekate UTMIP) + R413 (XUSB_PADCTL reset after hekate) + R412 (PLLU/UTMIP, true stop point) + R411 (DSDT DISP + GPU0 shared PMIC + ACPI GPIO/buttons/I2C/battery/fan/touch/power button/CPU clock/RTC/sensors/Bluetooth/audio + Wi-Fi PCIe + DSDT WLN0 + USB hot-plug + backlight PWM + touch power + fan + CPU 1020 MHz + USB + hub charging)\r\n");
@@ -6879,6 +6880,14 @@ R288Cleanup:
   R426PrintSummary ();
   R427PrintSummary ();
   R429PrintSummary ();
+  // R436: something is plugged in but the TV was not started - keep the lines
+  // above on screen for a photo (R435 no longer waits anywhere).
+  if (!mR434Shown && (SinkGatePassed || HostGatePassed)) {
+    Print (L"R436 TV NOT STARTED: path %s, DP Alt %s - holding 15 s for a photo\r\n",
+           SinkGatePassed ? L"SINK (hub with power)" : L"HOST (no power from the hub: DP Alt is only tried on the sink path)",
+           mR424Step == R424_NOT_RUN ? L"not run" : R424StepName (mR424Step));
+    gBS->Stall (15000000);
+  }
   Print (L"R414 PG at start=%08x%s\r\n", mR414PgAtStart,
          mR414Gated ? (mR414GateFail ? L" XUSB gate TIMEOUT" : L" XUSB partitions gated") : L"");
   if (!HostGatePassed && !SinkGatePassed && !mR378NoPartner) {

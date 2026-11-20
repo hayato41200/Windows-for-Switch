@@ -5616,6 +5616,13 @@ STATIC VOID R427DpLinkStage2b (VOID) {
   R427Wr (R427_PROD_1C, 0);
   R427Field (R427_DP_SPARE0, 1U, 1U);
   R427TermCal ();
+  // R440: TERMADJ at the top end means the pads have no power (LDO8 off):
+  // switching SOR1 to the pad clock would then take an SError. Stop here.
+  if (((R427Rd (R427_PLL1) >> 9) & 0xF) == 15) {
+    mR427Step = L"PAD-POWER";
+    Print (L"R440 termination calibration ran to 15: SOR1 pads have no power (vdd-hdmi-dp). Stopped before the pad clock.\r\n");
+    return;
+  }
   R427PadPowerUp ();
   R427Field (R427_PADCTL0, 0xFU, 0x3U);               // pad lanes 2 and 1 powered (TXD_2, TXD_1)
   R427Field (R427_LINKCTL0, 0x1FU << 16, 3U << 16);   // lane count 2
@@ -6620,7 +6627,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R439H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R440H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6632,6 +6639,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R440: LDO8 (SOR1 pads) on at every boot for Windows hot-plug; stop before the pad clock if the pads have no power\r\n");
   Print (L" R439: SOR1 pad power: MAX77620 LDO8 vdd-hdmi-dp 1.05 V on, HDMI pad DPD off (was left on by earlier boots)\r\n");
   Print (L" R438: a line per DPCD-setup step after the SOR1 pads come up\r\n");
   Print (L" R437: DP Alt tried -> end-of-UEFI disp2/DC-B state and a 15 s hold, always\r\n");
@@ -6717,6 +6725,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
     }
   }
   Print (L"BM92T source mode CONFIG1=%04x readback PASS.\r\n", TargetConfig1);
+  // R440: SOR1 pad rail on at every boot, so Windows (switchdisplay 1.4.0) can
+  // bring the TV up when a hub is plugged in later (it cannot reach the PMIC).
+  R439PadPower ();
   Print (L"Waiting up to 30s: host = INSERT+SRC_MODE+OTG_INSERT, sink = INSERT+VSAFE+!SRC_MODE+!DFP (3 samples)...\r\n");
   for (I = 0; I < R288_HOST_POLLS; ++I) {
     if (!R288Read16 (BM_STATUS1, &Status1, &S) ||

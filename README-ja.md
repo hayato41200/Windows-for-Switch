@@ -36,17 +36,16 @@ English: [README.md](README.md)
 | Bluetooth（キーボード、オーディオ） | UEFI R390（チップの電源、DSDT の BTH0）+ `switchbt.sys` + Windows 標準の BthMini。ファームウェアのパッチ `BCM4356A3.hcd` は各自で用意する。電波は機器にかなり近づけないと届かない |
 | Wi-Fi（ベータ）: WPA2-Personalで接続、DHCP、インターネット接続。Wi-Fi 5（802.11ac）、866/866 Mbit/s | UEFI R404/R405（PCIe port 1、BCM4356、DSDT WLN0）+ `switchwlan.sys` 0.6.13（ベータ）。ファームウェア `brcmfmac4356(A3)-pcie.bin/.txt` は各自で用意（動作確認済み 7.35.252.108）。2026-11-08に実機確認：fast.com 下り55 Mbit/s・上り39 Mbit/s |
 | 音声: スピーカーと 3.5 mm のヘッドホン端子（ヘッドホンを抜き差しすると自動で切り替わる） | UEFI R402（APE のクロック、ADMA/ADMAIF/XBAR/I2S1、コーデック ALC5639、DSDT の AUD0）と R403（ヘッドホンの経路、ジャックのスイッチ PV6）+ `switchaudio.sys` 1.0.0.7（PortCls の WaveRT、48 kHz・16 ビット・ステレオ） |
-| USB-C の DisplayPort Alt Mode でテレビに映す（DP Alt に対応した USB-C ハブ、電源あり。1280x720）。Windows に入ってからの抜き差しにも対応 | UEFI R424〜R441（BM92T で DP Alt Mode、DPAUX1、SOR1 のリンクトレーニング、DC-B と PLLD2、SOR1 のパッドの電源 LDO8）+ `switchbattery.sys` 1.0.0.7 + `switchdisplay.sys` 1.4.4（ベータ）。2026-11-20 に hekate の経路で実機確認。経緯は `docs/dp-alt-plan-ja.md` |
+| USB-C の DisplayPort Alt Mode でテレビに映す（DP Alt に対応した USB-C ハブ、または USB-C → HDMI アダプター。電源の有無はどちらでもよい）。テレビが対応していれば 1920x1080、そうでなければ 1280x720。Windows に入ってからの抜き差しにも対応 | UEFI R424〜R444（BM92T で DP Alt Mode、DPAUX1、SOR1 のリンクトレーニング、DC-B と PLLD2、SOR1 のパッドの電源 LDO8、EDID からの解像度、Switch が電気を送る側でも DP Alt）+ `switchbattery.sys` 1.0.0.8 + `switchdisplay.sys` 1.5.0。2026-11-20〜21 に hekate の経路で実機確認（電源ありのハブと、電源なしの ELECOM の 4K30 DP Alt アダプター）。経緯は `docs/dp-alt-plan-ja.md` |
 | 再起動しても時計が合っている | `switchrtc.sys` が MAX77620 の RTC を読み、最後の時刻同期で覚えたずれを足す。RTC には書き込まないので、Horizon の時計には影響しない |
 
 **まだできないこと:**
 - GPU による高速化（今は標準の画面ドライバーで描いている）
 - テレビ出力で足りないところ（今後実装する予定）:
   - テレビを2つ目の画面として使う（拡張表示）。今は本体と同じ画面を映すだけ。
-  - 1280x720 以外の解像度（テレビの EDID から 1080p などを選ぶ）。
   - HDMI からの音声。
-  - Nintendo 純正のドックでの確認（DP Alt に対応した市販の USB-C ハブで確認した）。
-  - 電源の無いハブ・変換ケーブルでの DP Alt Mode（今は、ハブから電気が来ているときだけ DP Alt Mode に入る）。
+  - Nintendo 純正のドックでの確認（市販のハブとアダプターで確認した）。
+  - 1920x1080 より大きい解像度（今のリンク、2 レーン・2.7 Gbps では 4K は送れない）。
 - Joy-Con のレール
 - スリープ
 - 音声で足りないところ:

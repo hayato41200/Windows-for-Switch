@@ -5001,6 +5001,7 @@ STATIC BOOLEAN mR426Hpd;
 STATIC UINT8 mR426Dpcd[16];
 STATIC BOOLEAN mR426DpcdOk;
 STATIC BOOLEAN mR426EdidOk;
+STATIC BOOLEAN mR426Has1080;   // R443: the EDID lists 1920x1080@60 (DTD 148.5 MHz or standard timing D1 C0)
 STATIC CHAR16 mR426Mfg[4];
 STATIC CHAR16 mR426Name[14];
 STATIC UINT32 mR426W, mR426H, mR426Hz;
@@ -5096,6 +5097,7 @@ STATIC VOID R426ParseEdid (CONST UINT8 *E) {
   UINT16 M;
   UINT32 Pclk, Ha, Hb, Va, Vb, Tot;
   CONST UINT8 *D;
+  mR426Has1080 = FALSE;
   for (I = 0; I < 128; ++I) Sum = (UINT8)(Sum + E[I]);
   if (CompareMem (E, Hdr, 8) != 0) {
     Print (L"R426 EDID: bad header\r\n");
@@ -5129,6 +5131,16 @@ STATIC VOID R426ParseEdid (CONST UINT8 *E) {
     Print (L"R426 EDID preferred: %ux%u @ %u Hz (pixel clock %u.%02u MHz)\r\n",
            Ha, Va, mR426Hz, Pclk / 100, Pclk % 100);
   }
+  // R443: does the sink take CEA 1920x1080@60 (any detailed timing, or a standard timing)?
+  for (K = 0; K < 4; ++K) {
+    D = E + 54 + 18 * K;
+    if ((UINT32)(D[0] | (D[1] << 8)) == 14850U && (D[2] | ((UINT32)(D[4] >> 4) << 8)) == 1920U &&
+        (D[5] | ((UINT32)(D[7] >> 4) << 8)) == 1080U && (D[17] & 0x80U) == 0)
+      mR426Has1080 = TRUE;
+  }
+  for (K = 38; K < 54; K += 2)
+    if (E[K] == 0xD1 && E[K + 1] == 0xC0) mR426Has1080 = TRUE;
+  Print (L"R443 EDID: 1920x1080@60 %s\r\n", mR426Has1080 ? L"listed" : L"not listed");
   Print (L"R426 EDID: maker %s product %04x name \"%s\" version %u.%u extensions %u checksum %s\r\n",
          mR426Mfg, (UINT32)(E[10] | (E[11] << 8)), mR426Name, E[18], E[19], E[126],
          Sum == 0 ? L"OK" : L"BAD");
@@ -5748,16 +5760,28 @@ STATIC VOID R427PrintSummary (VOID) {
 #define R429_SOR_CSTM           0x1BU
 #define R429_SOR_HBLANK_SYM     0x63U
 #define R429_SOR_VBLANK_SYM     0x64U
-// CEA-861 mode 4: 1280x720@60, +hsync +vsync
-#define R429_HACT  1280U
-#define R429_HFP   110U
-#define R429_HSYNC 40U
-#define R429_HBP   220U
-#define R429_VACT  720U
-#define R429_VFP   5U
-#define R429_VSYNC 5U
-#define R429_VBP   20U
-#define R429_PCLK  74250000U   // R433: PLLD2 594/8 = 74.25 MHz, shift divider 1
+// R443: the TV mode is chosen from the EDID. CEA-861 mode 4 (1280x720@60) or
+// mode 16 (1920x1080@60), both +hsync +vsync. PLLD2 VCO is 1188 MHz; PllP is
+// the hardware post-divider code (tegra210 pll_qlin: 16 -> 11, 8 -> 6).
+typedef struct {
+  UINT32 Hact, Hfp, Hsync, Hbp, Vact, Vfp, Vsync, Vbp, Pclk, PllP;
+  CONST CHAR16 *Name;
+  CONST CHAR16 *Clock;
+} R443_MODE;
+STATIC CONST R443_MODE mR443Modes[2] = {
+  { 1280, 110, 40, 220, 720, 5, 5, 20, 74250000U, 11, L"1280x720@60", L"PLLD2 74.25 MHz" },
+  { 1920, 88, 44, 148, 1080, 4, 5, 36, 148500000U, 6, L"1920x1080@60", L"PLLD2 148.5 MHz" },
+};
+STATIC CONST R443_MODE *mR443Mode = &mR443Modes[0];
+#define R429_HACT  (mR443Mode->Hact)
+#define R429_HFP   (mR443Mode->Hfp)
+#define R429_HSYNC (mR443Mode->Hsync)
+#define R429_HBP   (mR443Mode->Hbp)
+#define R429_VACT  (mR443Mode->Vact)
+#define R429_VFP   (mR443Mode->Vfp)
+#define R429_VSYNC (mR443Mode->Vsync)
+#define R429_VBP   (mR443Mode->Vbp)
+#define R429_PCLK  (mR443Mode->Pclk)   // R433: PLLD2 1188 MHz / P, shift divider 1
 
 STATIC CONST CHAR16 *mR429Step = NULL;
 STATIC BOOLEAN mR429Ok;
@@ -5893,7 +5917,7 @@ STATIC BOOLEAN R433PllD2 (VOID) {
   Car[R433_PLLD2_MISC2 / 4] = 0;
   Car[R433_PLLD2_MISC3 / 4] = 0x00000E00U;       // SDM din
   gBS->Stall (1);
-  B = R427_PLL_IDDQ | (11U << 19) | (30U << 8) | 1U;
+  B = R427_PLL_IDDQ | (mR443Mode->PllP << 19) | (30U << 8) | 1U;   // R443: P from the TV mode
   Car[R433_PLLD2_BASE / 4] = B;
   gBS->Stall (2);
   B &= ~R427_PLL_IDDQ;
@@ -6063,8 +6087,19 @@ STATIC VOID R429DpVideoStage3 (VOID) {
   CONST UINT32 Colors[4] = { 0xFF0000FFU, 0xFF00FF00U, 0xFFFF0000U, 0xFFFFFFFFU };
   CONST CHAR16 *Names[4] = { L"colour 1 (red?)", L"colour 2 (green)", L"colour 3 (blue?)", L"white" };
 
-  Print (L"\r\n---- R429 DP Alt Mode stage 3 (DC-B -> SOR1, 1280x720@60 solid colour) ----\r\n");
+  Print (L"\r\n---- R429 DP Alt Mode stage 3 (DC-B -> SOR1) ----\r\n");
   mR429Step = L"TU-CALC";
+  // R443: 1920x1080@60 when the EDID lists it and it fits the trained link
+  mR443Mode = &mR443Modes[0];
+  if (mR426Has1080) {
+    mR443Mode = &mR443Modes[1];
+    if (!R429CalcTu (LinkRate, &Tu, &Act, &Frac, &Pol, &Wm, &Hb, &Vb)) {
+      Print (L"R443 1920x1080@60 does not fit the link (%u Mbit/s per lane): 1280x720@60\r\n",
+             LinkRate / 100000U);
+      mR443Mode = &mR443Modes[0];
+    }
+  }
+  Print (L"R443 TV mode %s (pixel clock %u kHz)\r\n", mR443Mode->Name, R429_PCLK / 1000U);
   if (!R429CalcTu (LinkRate, &Tu, &Act, &Frac, &Pol, &Wm, &Hb, &Vb)) {
     Print (L"R429 mode does not fit the link. Stopped.\r\n");
     return;
@@ -6162,7 +6197,7 @@ STATIC VOID R429DpVideoStage3 (VOID) {
   R429DcDump (L"attached");
   mR433Fps10 = R433MeasureFps ();
   Print (L"R433 DC-B measured about %u.%u frames/s (want 60.0; clock %s)\r\n", mR433Fps10 / 10, mR433Fps10 % 10,
-         mR433PllD2 ? L"PLLD2 74.25 MHz" : L"PLLP/5.5");
+         mR433PllD2 ? mR443Mode->Clock : L"PLLP/5.5");
   R429DcWr (R429_DC_INT_STATUS, 0xFFFFFFFFU);
   gBS->Stall (100000);
   V = R429DcRd (R429_DC_INT_STATUS);
@@ -6215,8 +6250,8 @@ STATIC VOID R429PrintSummary (VOID) {
   if (mR429Step == NULL) return;
   if (mR434Shown)
     Print (L"R434 TV MIRROR: UEFI screen from FB %08x on DC-B window A (INT %08x)\r\n", mR434Fb, mR434Uf);
-  Print (L"R429 DP-VIDEO: %s at %s; 1280x720@60 TU %u act %u frac %u wm %u; SOR TEST %08x\r\n",
-         mR429Ok ? L"DONE" : L"STOPPED", mR429Step, mR429Tu, mR429Act, mR429Frac, mR429Wm, mR429Test);
+  Print (L"R429 DP-VIDEO: %s at %s; %s TU %u act %u frac %u wm %u; SOR TEST %08x\r\n",
+         mR429Ok ? L"DONE" : L"STOPPED", mR429Step, mR443Mode->Name, mR429Tu, mR429Act, mR429Frac, mR429Wm, mR429Test);
 }
 
 STATIC VOID R424DpAltStage1 (VOID) {
@@ -6627,7 +6662,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R441H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R444H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
@@ -6639,6 +6674,8 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   Print (L" R431: DP->HDMI converter identity, 20 s white hold with per-second link/stream status\r\n");
   Print (L" R432: hubs answering as the Nintendo dock enter standard DP Alt Mode (SVID FF01) when offered\r\n");
   Print (L" R433: DC-B clock from PLLD2 74.25 MHz with shift divider 1 (SOR needs DC clock = pixel clock)\r\n");
+  Print (L" R444: DP Alt Mode also when the Switch powers VBUS (adapters/hubs without their own power)\r\n");
+  Print (L" R443: TV mode from the EDID: 1920x1080@60 when listed and it fits the link, else 1280x720@60\r\n");
   Print (L" R441: release build of the DP Alt work (no 15 s holds at the end)\r\n");
   Print (L" R440: LDO8 (SOR1 pads) on at every boot for Windows hot-plug; stop before the pad clock if the pads have no power\r\n");
   Print (L" R439: SOR1 pad power: MAX77620 LDO8 vdd-hdmi-dp 1.05 V on, HDMI pad DPD off (was left on by earlier boots)\r\n");
@@ -6805,6 +6842,11 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   }
   BqEnableOk = TRUE;
   Print (L"VBUS enabled/readback PASS. Apply Linux-matched USB2 path fields.\r\n");
+  // R444: DP Alt Mode also with the Switch as the power source (USB-C -> HDMI
+  // adapters and hubs without their own power). The partner gets 2 s on VBUS
+  // for its PD contract first; one without USB PD fails Discover Identity.
+  gBS->Stall (2000000);
+  R424DpAltStage1 ();
   if (mR362Production) {
     R363DisableBqWatchdog ();
   } else {

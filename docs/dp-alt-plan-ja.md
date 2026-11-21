@@ -96,6 +96,7 @@ L4T の `bm92t_event_handler` の手順を、割り込みの代わりに ALERT �
    - **4b: 抜き差し。** 2 つに分ける。
      - **4b-1(switchbattery 1.0.0.7):** BM92T を読むのは switchbattery だけのまま、シンクの設定のあと DFP なら UEFI R424 の手順で DP Alt Mode に入る(ドックを名乗るハブは標準の DP を優先、本物のドックは Nintendo モードとドック用 VDM)。状態はカーネルのコールバック `\Callback\SwitchWoaDpAlt`(Argument1 = 1 入った / 0 抜けた、Argument2 = DP_STATUS)で、変わったときと、入っている間は 5 秒ごとに知らせる。UEFI がすでに入れていれば(DP_EN)知らせるだけ。
      - **4b-2(switchdisplay):** コールバックを受けて、自分のスレッドで UEFI R426(DPAUX1)・R427(PLLDP、SOR1 のパッド、リンクトレーニング)・R429/R433(DC-B、PLLD2、ラスター、SOR1 の取り付け)をして、4a のウィンドウにつなぐ。抜けたら DC-B を止め、SOR1 をリセットに戻す。SOR1 のパッドの電源 LDO8(I2C5 の PMIC)は Windows からは触れないので、UEFI がテレビの有無にかかわらず起動時に入れておく。
+   - **仕上げ(2026-11-21): R444H + switchdisplay 1.5.0 + switchbattery 1.0.0.8。** R443 で EDID に 1920x1080@60(DTD 148.5 MHz か、標準タイミング D1 C0)があり、リンクに収まれば CEA 1080p(PLLD2 1188 / 8 = 148.5 MHz、pll_qlin の P コード 6)。switchdisplay は 1280x720 のバッファをウィンドウ A の DDA で 1.5 倍に広げる。R444 と switchbattery 1.0.0.8 で、Switch が VBUS を出しているとき(ホスト側)にも DP Alt Mode に入る(VBUS を入れて 2 秒後)。**実機: テレビの入力は 1080p。電源ありのハブと、電源なしの ELECOM の 4K30 DP Alt アダプターの両方で、起動時と Windows での抜き差しの両方で映った。**
    - **4c: 2 つ目の画面(拡張)。** 2 つ目の VidPN source / target。モードは EDID から。ホットプラグは BM92T の ALERT と HPD から。
 3. Windows の BM92T: 今は switchbattery v4 が STATUS1 を読み、DR_SWAP をする。DP Alt Mode の状態(ドックの抜き差し)を扱うのは 1 つのドライバーにまとめる必要がある(ALERT を読むと消えるため、2 つのドライバーが読むと取り合いになる)。
 

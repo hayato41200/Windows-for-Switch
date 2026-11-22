@@ -4289,7 +4289,7 @@ STATIC VOID R403Headphones (VOID) {
 }
 
 #ifndef R445_AUDIO_HOLD_S
-#define R445_AUDIO_HOLD_S 10
+#define R445_AUDIO_HOLD_S 0
 #endif
 // R445: the codec registers and the DAP1 pads as Windows gets them (one look
 // on the screen instead of a test round per register).
@@ -6740,7 +6740,7 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
   Print (L" R445H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
-  Print (L" R445: audio IO pads at 1.8 V as L4T (hekate left them at 3.3 V: silent speaker), codec register dump\r\n");
+  Print (L" R445: audio IO pads at 1.8 V as L4T (hekate left them at 3.3 V: silent speaker), codec register dump (no hold)\r\n");
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");

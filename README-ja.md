@@ -35,7 +35,7 @@ English: [README.md](README.md)
 | 画面の自動回転 | UEFI R379（SPI4 と I2C2 のクロック、DSDT の SENS）+ `switchsensor.sys`（LSM6DS3H）+ 常駐アプリ。明るさセンサーは、この本体では見つからない |
 | Bluetooth（キーボード、オーディオ） | UEFI R390（チップの電源、DSDT の BTH0）+ `switchbt.sys` + Windows 標準の BthMini。ファームウェアのパッチ `BCM4356A3.hcd` は各自で用意する。電波は機器にかなり近づけないと届かない |
 | Wi-Fi（ベータ）: WPA2-Personalで接続、DHCP、インターネット接続。Wi-Fi 5（802.11ac）、866/866 Mbit/s | UEFI R404/R405（PCIe port 1、BCM4356、DSDT WLN0）+ `switchwlan.sys` 0.6.13（ベータ）。ファームウェア `brcmfmac4356(A3)-pcie.bin/.txt` は各自で用意（動作確認済み 7.35.252.108）。2026-11-08に実機確認：fast.com 下り55 Mbit/s・上り39 Mbit/s |
-| 音声: スピーカーと 3.5 mm のヘッドホン端子（ヘッドホンを抜き差しすると自動で切り替わる） | UEFI R402（APE のクロック、ADMA/ADMAIF/XBAR/I2S1、コーデック ALC5639、DSDT の AUD0）と R403（ヘッドホンの経路、ジャックのスイッチ PV6）+ `switchaudio.sys` 1.0.0.7（PortCls の WaveRT、48 kHz・16 ビット・ステレオ） |
+| 音声: スピーカーと 3.5 mm のヘッドホン端子（ヘッドホンを抜き差しすると自動で切り替わる） | UEFI R402（APE のクロック、ADMA/ADMAIF/XBAR/I2S1、コーデック ALC5639、DSDT の AUD0）と R403（ヘッドホンの経路、ジャックのスイッチ PV6）、hekate から起動するときは R445H（音のパッドを 1.8 V にする）+ `switchaudio.sys` 1.0.0.7（PortCls の WaveRT、48 kHz・16 ビット・ステレオ） |
 | USB-C の DisplayPort Alt Mode でテレビに映す（DP Alt に対応した USB-C ハブ、または USB-C → HDMI アダプター。電源の有無はどちらでもよい）。テレビが対応していれば 1920x1080、そうでなければ 1280x720。Windows に入ってからの抜き差しにも対応 | UEFI R424〜R444（BM92T で DP Alt Mode、DPAUX1、SOR1 のリンクトレーニング、DC-B と PLLD2、SOR1 のパッドの電源 LDO8、EDID からの解像度、Switch が電気を送る側でも DP Alt）+ `switchbattery.sys` 1.0.0.8 + `switchdisplay.sys` 1.5.0。2026-11-20〜21 に hekate の経路で実機確認（電源ありのハブと、電源なしの ELECOM の 4K30 DP Alt アダプター）。経緯は `docs/dp-alt-plan-ja.md` |
 | 再起動しても時計が合っている | `switchrtc.sys` が MAX77620 の RTC を読み、最後の時刻同期で覚えたずれを足す。RTC には書き込まないので、Horizon の時計には影響しない |
 

@@ -3981,12 +3981,58 @@ STATIC BOOLEAN R393CodecRead16 (UINT8 Reg, UINT16 *Value) {
   return TRUE;
 }
 
+// R445: the audio IO pads at 1.8 V, as L4T (pmc iopad-defaults: "audio" and
+// "audio-hv" power-source-voltage 1.8 V) and coreboot's bootblock
+// (pmc_override_pwr_det: audio rail bit 18 to 1.8 V) do. hekate leaves PMC
+// PWR_DET_VAL alone, so on the hekate chain the audio pads (DAP1 to the
+// codec) stayed in 3.3 V mode on a 1.8 V rail: ADMA and I2S1 ran, but the
+// speaker stayed silent (2026-11-22, R444H). Linux tegra210_io_pads:
+// audio = PWR_DET bit 5, DPD bit 17; audio-hv = PWR_DET bit 18, DPD2 bit 29.
+// A cleared PWR_DET_VAL bit means 1.8 V. The pads also leave deep power-down.
+#define R445_PMC_PWR_DET      0x48U
+#define R445_PMC_PWR_DET_VAL  0xE4U
+#define R445_PMC_NO_IOPOWER   0x44U
+#define R445_PMC_IO_DPD_REQ   0x1B8U
+#define R445_PMC_IO_DPD_STAT  0x1BCU
+#define R445_PMC_IO_DPD2_REQ  0x1C0U
+#define R445_PMC_IO_DPD2_STAT 0x1C4U
+#define R445_VOLT_AUDIO       (1U << 5)
+#define R445_VOLT_AUDIO_HV    (1U << 18)
+#define R445_DPD_AUDIO        (1U << 17)
+#define R445_DPD2_AUDIO_HV    (1U << 29)
+
+STATIC VOID R445AudioPads (VOID) {
+  volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
+  UINT32 Det = Pmc[R445_PMC_PWR_DET / 4], Val = Pmc[R445_PMC_PWR_DET_VAL / 4];
+  UINT32 Dpd = Pmc[R445_PMC_IO_DPD_STAT / 4], Dpd2 = Pmc[R445_PMC_IO_DPD2_STAT / 4];
+
+  Pmc[R445_PMC_PWR_DET / 4] = Det | R445_VOLT_AUDIO | R445_VOLT_AUDIO_HV;
+  Pmc[R445_PMC_PWR_DET_VAL / 4] = Val & ~(R445_VOLT_AUDIO | R445_VOLT_AUDIO_HV);
+  (VOID)Pmc[R445_PMC_PWR_DET_VAL / 4];
+  gBS->Stall (250);
+  Pmc[R445_PMC_IO_DPD_REQ / 4] = (1U << 30) | R445_DPD_AUDIO;       // code 1 = DPD off
+  Pmc[R445_PMC_IO_DPD2_REQ / 4] = (1U << 30) | R445_DPD2_AUDIO_HV;
+  gBS->Stall (100);
+  Print (L"R445 audio pads: audio %s -> %s, audio-hv %s -> %s (PWR_DET %08x -> %08x, VAL %08x -> %08x); "
+         L"DPD audio %u -> %u, audio-hv %u -> %u; NO_IOPOWER %08x\r\n",
+         (Val & R445_VOLT_AUDIO) ? L"3.3V" : L"1.8V",
+         (Pmc[R445_PMC_PWR_DET_VAL / 4] & R445_VOLT_AUDIO) ? L"3.3V" : L"1.8V",
+         (Val & R445_VOLT_AUDIO_HV) ? L"3.3V" : L"1.8V",
+         (Pmc[R445_PMC_PWR_DET_VAL / 4] & R445_VOLT_AUDIO_HV) ? L"3.3V" : L"1.8V",
+         Det, Pmc[R445_PMC_PWR_DET / 4], Val, Pmc[R445_PMC_PWR_DET_VAL / 4],
+         (Dpd & R445_DPD_AUDIO) != 0, (Pmc[R445_PMC_IO_DPD_STAT / 4] & R445_DPD_AUDIO) != 0,
+         (Dpd2 & R445_DPD2_AUDIO_HV) != 0, (Pmc[R445_PMC_IO_DPD2_STAT / 4] & R445_DPD2_AUDIO_HV) != 0,
+         Pmc[R445_PMC_NO_IOPOWER / 4]);
+}
+
 STATIC VOID R393AudioProbe (VOID) {
   volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
   volatile UINT32 *Pmc = (volatile UINT32 *)PMC_BASE;
   UINT16 Id1 = 0, Id2 = 0, Reset = 0;
   BOOLEAN Ok1, Ok2, Ok3;
+
+  R445AudioPads ();
 
   // Codec LDO1 enable: PZ4 as a GPIO output, high (pad as in the L4T pinmux, pull down, driven).
   Pin[PINMUX_GPIO_PZ4 / 4] = PINMUX_PULL_DOWN_BITS;
@@ -4242,6 +4288,35 @@ STATIC VOID R403Headphones (VOID) {
          Plugged ? L"headphones" : L"speaker");
 }
 
+#ifndef R445_AUDIO_HOLD_S
+#define R445_AUDIO_HOLD_S 0
+#endif
+// R445: the codec registers and the DAP1 pads as Windows gets them (one look
+// on the screen instead of a test round per register).
+STATIC VOID R445CodecDump (VOID) {
+  STATIC CONST UINT8 Regs[] = {
+    0x01, 0x02, 0x2A, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4F, 0x52, 0x61, 0x62, 0x63, 0x64,
+    0x65, 0x66, 0x70, 0x73, 0x80, 0x81, 0x82, 0x8E, 0x8F, 0x91, 0xFA,
+  };
+  volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
+  UINTN Index;
+  UINT16 Value;
+
+  Print (L"R445 codec:");
+  for (Index = 0; Index < ARRAY_SIZE (Regs); ++Index) {
+    Value = 0xFFFF;
+    if (!R393CodecRead16 (Regs[Index], &Value)) Value = 0xEEEE;
+    Print (L" %02x=%04x", Regs[Index], Value);
+  }
+  Print (L"\r\nR445 DAP1 pinmux: FS=%08x DIN=%08x DOUT=%08x SCLK=%08x\r\n",
+         Pin[PINMUX_DAP1_FS / 4], Pin[PINMUX_DAP1_DIN / 4], Pin[PINMUX_DAP1_DOUT / 4],
+         Pin[PINMUX_DAP1_SCLK / 4]);
+#if R445_AUDIO_HOLD_S != 0
+  Print (L"R445 audio: %u s hold to read the lines above\r\n", (UINT32)R445_AUDIO_HOLD_S);
+  gBS->Stall (R445_AUDIO_HOLD_S * 1000000U);
+#endif
+}
+
 STATIC VOID R395AudioTone (BOOLEAN PlayTone) {
   volatile UINT32 *Pin = (volatile UINT32 *)PINMUX_BASE;
   volatile UINT32 *Car = (volatile UINT32 *)CAR_BASE;
@@ -4393,6 +4468,7 @@ STATIC VOID R395AudioTone (BOOLEAN PlayTone) {
   Print (L"R402 audio: left running for Windows, speaker volume %04x: %s\r\n", R402_SPK_VOL,
          R395CodecWrite (RT5640_SPK_VOL, (UINT16)R402_SPK_VOL) ? L"ok" : L"I2C FAIL");
   R403Headphones ();
+  R445CodecDump ();
 }
 
 STATIC VOID R390BluetoothPowerOn (VOID) {
@@ -6662,8 +6738,9 @@ STATIC VOID EFIAPI RunTest (EFI_EVENT Event, VOID *Context) {
   St->ConOut->ClearScreen (St->ConOut);
   Print (L"============================================================\r\n");
 #ifdef SWITCH_BOOT_CHAIN_HEKATE
-  Print (L" R444H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
+  Print (L" R445H: hekate L4T chain (hekate -> BL31 -> bl33.bin)\r\n");
 #endif
+  Print (L" R445: audio IO pads at 1.8 V as L4T (hekate left them at 3.3 V: silent speaker), codec register dump (no hold)\r\n");
   Print (L" R424: USB-C DP Alt Mode stage 1 (BM92T: dock alt mode, DP configure + HPD, dock LED/hub)\r\n");
   Print (L" R425: DP Alt Mode also for non-Nintendo DP adapters/docks (generic DP enter, plug/receptacle pin)\r\n");
   Print (L" R426: DP Alt Mode stage 2a (DPAUX1: HPD, DPCD, EDID over AUX)\r\n");

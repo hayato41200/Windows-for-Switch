@@ -465,8 +465,10 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
         // GPU bring-up stage A (power the GPU, read NV_PMC_BOOT_0). Order
         // matters (the driver takes them by position): BAR0 (PRI), BAR1,
         // MAX77621 VDD_GPU on I2C5 0x1C, MAX77620 on I2C5 0x3C (its GPIO6 is
-        // the VDD_GPU enable; PWRB uses the same chip, so Shared). No
-        // interrupt yet (stall SPI 157 / nonstall SPI 158 come with stage B).
+        // the VDD_GPU enable; PWRB uses the same chip, so Shared).
+        // R447: GPU stage E3 - the two GPU interrupts, after the I2C entries so
+        // the earlier positions stay: stall SPI 157 (GSIV 189) and nonstall
+        // SPI 158 (GSIV 190), level high as in tegra210-soc-base.dtsi.
         // Without the driver nothing touches the GPU: its rail stays off.
         Device (GPU0)
         {
@@ -478,6 +480,8 @@ DefinitionBlock("DsdtTable.aml", "DSDT", 1, "NVIDIA", "TEGRA210", EFI_ACPI_ARM_O
                 Memory32Fixed (ReadWrite, 0x58000000, 0x01000000)   // BAR1
                 I2cSerialBusV2 (0x001C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Exclusive, )
                 I2cSerialBusV2 (0x003C, ControllerInitiated, 400000, AddressingMode7Bit, "\\_SB.I2C5", 0x00, ResourceConsumer, , Shared, )
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x000000BD }   // stall (SPI 157)
+                Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 0x000000BE }   // nonstall (SPI 158)
             })
 
             Method (_STA, 0, NotSerialized)

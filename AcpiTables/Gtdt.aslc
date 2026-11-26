@@ -21,7 +21,11 @@
 #include "Platform.h"
 
 #define SYSTEM_TIMER_BASE_ADDRESS 0xFFFFFFFFFFFFFFFF
-#define GTDT_GTIMER_FLAGS EFI_ACPI_6_2_GTDT_TIMER_FLAG_TIMER_INTERRUPT_POLARITY
+// R448: Always-on Capability (bit 2): the per-core architected timers keep running and can wake
+// the cores in every idle state Windows uses (only WFI/C1 so far: no _LPI yet). Without it
+// Windows found no timer it may rely on while idle and slept until another interrupt
+// (the power button) while the screen was off: a 10 s wait took 332.7 s on R447H.
+#define GTDT_GTIMER_FLAGS (EFI_ACPI_6_2_GTDT_TIMER_FLAG_TIMER_INTERRUPT_POLARITY | EFI_ACPI_6_2_GTDT_TIMER_FLAG_ALWAYS_ON_CAPABILITY)
 
 #pragma pack(1)
 
